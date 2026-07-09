@@ -131,7 +131,7 @@ def _pdf_small_time(t: float, v: float, a: float, w: float, choice: int,
     if choice == 2:
         v, w = -v, 1.0 - w
 
-    pre = np.exp(-v * a * w - 0.5 * v * v * t) / np.sqrt(2.0 * np.pi * t ** 3)
+    pre = a * np.exp(-v * a * w - 0.5 * v * v * t) / np.sqrt(2.0 * np.pi * t ** 3)
     s = 0.0
     scale = (a * a) / t
     for k in range(-k_max, k_max + 1):
