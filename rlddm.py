@@ -11,11 +11,10 @@ can read the two files side-by-side.  It implements:
   * Bayesian helpers:    rlddm_priors, rlddm_log_prior, rlddm_log_posterior
   * Plotting helpers:    rlddm_plot (and the small helpers it needs)
 
-The DDM primitives replace R's WienR::rWDM / WienR::dWDM with a pure-Python
-analytic first-passage-time implementation (Navarro & Fuss, 2009).  For the
-default case without inter-trial variability (sv = sw = st0 = 0) this is exact.
-When inter-trial variability is requested the density is integrated numerically,
-which is slower but mathematically equivalent.
+The DDM log-density (ddm_logpdf_trial) uses a pure-Python analytic
+first-passage-time implementation (Navarro & Fuss, 2009).  The DDM sampler
+(ddm_sample_trial) uses the ssms package's full_ddm model, which supports
+all inter-trial variability parameters (sv, sw, st0).
 """
 
 from __future__ import annotations
@@ -256,21 +255,10 @@ def ddm_sample_trial(pars: dict,
                      rng: np.random.Generator | None = None) -> dict:
     """Sample one (choice, rt) pair from the 7-parameter DDM.
 
-    Uses the ``full_ddm`` model from ``ssms`` (the simulator backend that
-    HSSM wraps).  This supports all inter-trial variability parameters
-    (sv, sw, st0) natively, so there is no need for an Euler-Maruyama
-    fallback.
+    Uses the ``full_ddm`` model from ``ssms``, which supports all
+    inter-trial variability parameters (sv, sw, st0) natively.
 
-    Parameterisation note: ``ssms`` parametrises the DDM with the boundary
-    parameter as the *half*-boundary (boundaries at +/-a), so the full
-    boundary separation is 2*a.  WienR and the analytic density in this
-    module use ``a`` as the *full* boundary separation (boundaries at 0 and a).
-    We therefore pass ``a / 2`` to ssms.  The relative starting point ``w``
-    maps unchanged to ssms's ``z``.  The variability parameters map as:
-        sw -> sz  (starting-point variability, full range)
-        st0 -> st (non-decision-time variability, full range)
-
-    Choice encoding matches WienR: 1 = lower boundary, 2 = upper boundary.
+    Choice encoding: 1 = lower boundary, 2 = upper boundary.
     """
     rng = rng or np.random.default_rng()
 
@@ -288,12 +276,12 @@ def ddm_sample_trial(pars: dict,
     result = ssms_simulator(
         theta={
             "v": v,
-            "a": a / 2.0,      # ssms uses half-boundary; WienR uses full
-            "z": w,             # relative starting point, same convention
-            "t": t0,            # non-decision time
-            "sz": sw,           # starting-point variability (full range)
-            "sv": sv,           # drift-rate variability (SD)
-            "st": st0,          # non-decision-time variability (full range)
+            "a": a / 2.0,
+            "z": w,
+            "t": t0,
+            "sz": sw,
+            "sv": sv,
+            "st": st0,
         },
         model="full_ddm",
         n_samples=1,
@@ -301,7 +289,6 @@ def ddm_sample_trial(pars: dict,
     )
     rt = float(result["rts"][0, 0])
     ssms_resp = int(result["choices"][0, 0])
-    # ssms: 1 -> upper, -1 -> lower.  Map to WienR convention.
     choice = 2 if ssms_resp > 0 else 1
     return {"choice": choice, "rt": rt}
 
@@ -322,8 +309,20 @@ def compute_drift(values: np.ndarray, pars: dict) -> float:
 def rlddm_simulate(task_environment: pd.DataFrame | np.ndarray,
                    pars: dict,
                    initial_values: tuple | list | np.ndarray = (0.0, 0.0),
-                   rng: np.random.Generator | None = None) -> dict:
-    """Simulate choices and RTs from an RLDDM for a given task environment."""
+                   rng: np.random.Generator | None = None,
+                   correct_bandit: np.ndarray | None = None,
+                   reversal_points: tuple | list | None = None) -> dict:
+    """Simulate choices and RTs from an RLDDM for a given task environment.
+
+    Parameters
+    ----------
+    correct_bandit : optional int array of shape (n_trials,)
+        Which bandit (1 or 2) is correct on each trial.  Stored in the output
+        as ``is_correct`` for behavioural analysis — the model never sees it.
+    reversal_points : optional
+        Trial indices where the correct bandit flips.  Stored in the output
+        for plotting and post-reversal analysis.
+    """
     rng = rng or np.random.default_rng()
     pars = fill_rlddm_pars(pars)
 
@@ -349,7 +348,6 @@ def rlddm_simulate(task_environment: pd.DataFrame | np.ndarray,
         choices[t] = sim["choice"]
         RTs[t] = sim["rt"]
 
-        # choice is 1/2 -> Python index 0/1
         outcomes[t] = task_environment[t, choices[t] - 1]
 
         prediction_errors[t] = outcomes[t] - values[t, choices[t] - 1]
@@ -367,6 +365,13 @@ def rlddm_simulate(task_environment: pd.DataFrame | np.ndarray,
         "outcomes": outcomes,
     })
 
+    # Behavioural metadata: did the participant choose the correct bandit?
+    if correct_bandit is not None:
+        is_correct = (choices == np.asarray(correct_bandit)).astype(int)
+        data["is_correct"] = is_correct
+    else:
+        is_correct = None
+
     parameters = dict(pars)
     parameters["initial_values"] = initial_values
 
@@ -377,6 +382,8 @@ def rlddm_simulate(task_environment: pd.DataFrame | np.ndarray,
         "prediction_errors": prediction_errors,
         "parameters": parameters,
         "task_environment": task_environment,
+        "is_correct": is_correct,
+        "reversal_points": list(reversal_points) if reversal_points is not None else None,
     }
 
 
@@ -518,12 +525,16 @@ def _parameter_label(parameters: dict) -> str:
 
 
 def _plot_values(ax, fit, show_legend: bool = False,
-                 option_names: list | None = None):
+                 option_names: list | None = None,
+                 reversal_points: list | None = None):
     values_mat = fit["values"]
     n_trials = values_mat.shape[0]
     for i in range(values_mat.shape[1]):
         ax.plot(range(1, n_trials + 1), values_mat[:, i],
                 color=RLDDM_COLOURS[i], lw=2, label=option_names[i] if option_names else None)
+    if reversal_points:
+        for rev in reversal_points:
+            ax.axvline(rev, color="gray", ls="--", lw=0.8)
     ax.set_xlabel("Trial")
     ax.set_ylabel("Estimated value")
     ax.set_title("Learned values")
@@ -533,10 +544,13 @@ def _plot_values(ax, fit, show_legend: bool = False,
         ax.legend(frameon=False)
 
 
-def _plot_drifts(ax, fit):
+def _plot_drifts(ax, fit, reversal_points: list | None = None):
     n_trials = len(fit["drifts"])
     ax.plot(range(1, n_trials + 1), fit["drifts"], color="black", lw=2)
     ax.axhline(fit["parameters"]["v_intercept"], color="grey", ls="--")
+    if reversal_points:
+        for rev in reversal_points:
+            ax.axvline(rev, color="gray", ls="--", lw=0.8)
     ax.set_xlabel("Trial")
     ax.set_ylabel("Drift rate")
     ax.set_title("Drift scaled by value")
@@ -544,7 +558,7 @@ def _plot_drifts(ax, fit):
     ax.spines["right"].set_visible(False)
 
 
-def _plot_pred_errors(ax, fit):
+def _plot_pred_errors(ax, fit, reversal_points: list | None = None):
     x = np.arange(1, len(fit["prediction_errors"]) + 1)
     y = fit["prediction_errors"]
     choices = fit["data"]["choices"].to_numpy()
@@ -552,6 +566,9 @@ def _plot_pred_errors(ax, fit):
         ax.plot([x[i], x[i]], [0, y[i]], color=RLDDM_COLOURS[choices[i] - 1], lw=1)
     ax.scatter(x, y, c=[RLDDM_COLOURS[c - 1] for c in choices], zorder=3)
     ax.axhline(0, color="0.5", ls="--")
+    if reversal_points:
+        for rev in reversal_points:
+            ax.axvline(rev, color="gray", ls="--", lw=0.8)
     ax.set_xlabel("Trial")
     ax.set_ylabel("Prediction error")
     ax.set_title("Prediction errors")
@@ -560,7 +577,8 @@ def _plot_pred_errors(ax, fit):
 
 
 def _plot_outcomes(ax, fit, task_environment=None, show_legend: bool = False,
-                   option_names: list | None = None):
+                   option_names: list | None = None,
+                   reversal_points: list | None = None):
     n_trials = fit["values"].shape[0]
     n_options = fit["values"].shape[1]
     if task_environment is None:
@@ -580,6 +598,9 @@ def _plot_outcomes(ax, fit, task_environment=None, show_legend: bool = False,
     ax.set_title("Observed outcomes")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
+    if reversal_points:
+        for rev in reversal_points:
+            ax.axvline(rev, color="gray", ls="--", lw=0.8)
 
 
 def _plot_ddm_schematic(ax, pars, colours=None, n_traces: int = 10,
@@ -687,12 +708,13 @@ def rlddm_plot(fit,
     """Create the two-page diagnostic figure set from the R code."""
     pars = fit["parameters"]
     option_names = ["Option 1", "Option 2"]
+    rev_points = fit.get("reversal_points")
 
     fig1, axes1 = plt.subplots(2, 2, figsize=(10, 8))
-    _plot_values(axes1[0, 0], fit, show_legends, option_names)
-    _plot_drifts(axes1[0, 1], fit)
-    _plot_pred_errors(axes1[1, 0], fit)
-    _plot_outcomes(axes1[1, 1], fit, task_environment, show_legends, option_names)
+    _plot_values(axes1[0, 0], fit, show_legends, option_names, rev_points)
+    _plot_drifts(axes1[0, 1], fit, rev_points)
+    _plot_pred_errors(axes1[1, 0], fit, rev_points)
+    _plot_outcomes(axes1[1, 1], fit, task_environment, show_legends, option_names, rev_points)
     fig1.suptitle("RL-DDM\n" + _parameter_label(pars), fontsize=10)
     fig1.tight_layout(rect=[0, 0, 1, 0.96])
 
@@ -725,23 +747,26 @@ def rlddm_plot(fit,
 
 
 # =============================================================================
-# Simple CLI / smoke-test
+# CLI entry point
 # =============================================================================
 
 if __name__ == "__main__":
-    from create_task_environment import generate_timeline, timeline_to_matrix
+    from create_task_environment import generate_timeline, timeline_to_matrix, timeline_to_correct
 
     rng = np.random.default_rng(42)
-    timeline = generate_timeline(num_trials=140, seed=42, reversed_state=True)
+    reversal_points = (36, 56, 71, 86, 106)
+    timeline = generate_timeline(num_trials=140, seed=42, reversed_state=True,
+                                 reversal_points=reversal_points)
     env = timeline_to_matrix(timeline)
+    correct = timeline_to_correct(timeline)
 
     pars = {"alpha": 0.25, "v_intercept": 0.0, "v_scale": 1.0,
             "a": 3.0, "w": 0.5, "t0": 0.25}
-    fit = rlddm_simulate(env, pars, rng=rng)
+    fit = rlddm_simulate(env, pars, rng=rng, correct_bandit=correct,
+                         reversal_points=reversal_points)
     print("Simulated", len(fit["data"]), "trials from the PRLT environment")
     print("Mean log-lik of simulated data under true pars:",
           rlddm_log_lik(fit["data"], pars) / len(fit["data"]))
+    print("Overall accuracy:", fit["data"]["is_correct"].mean())
     print("First 5 trials:")
     print(fit["data"].head())
-    print("\nValue of bandit_1 at trial 10:", fit["values"][9, 0])
-    print("Drift at trial 10:", fit["drifts"][9])

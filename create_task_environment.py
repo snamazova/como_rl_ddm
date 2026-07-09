@@ -79,7 +79,9 @@ def generate_timeline(num_trials=140, seed=None, reversed_state=None,
         p_correct: Reward probability for the currently-correct bandit.
 
     Returns:
-        A list of dicts, one per trial, with "bandit_1"/"bandit_2" reward values.
+        A list of dicts, one per trial, with "bandit_1"/"bandit_2" reward values
+        and a "correct" field indicating which bandit (1 or 2) is the
+        currently-correct one for that trial.
     """
     if reversed_state is None:
         reversed_state = random.choice([True, False])
@@ -103,7 +105,8 @@ def generate_timeline(num_trials=140, seed=None, reversed_state=None,
                 bandit_2_reward, bandit_1_reward = int(correct_bandit_wins), int(1 - correct_bandit_wins)
             timeline[start + offset] = {
                 "bandit_1": {"color": "orange", "value": bandit_1_reward},
-                "bandit_2": {"color": "blue", "value": bandit_2_reward}
+                "bandit_2": {"color": "blue", "value": bandit_2_reward},
+                "correct": 1 if bandit_1_correct else 2,
             }
         bandit_1_correct = not bandit_1_correct  # reversal flips which bandit is correct
 
@@ -178,6 +181,15 @@ def timeline_to_matrix(timeline):
         [trial["bandit_1"]["value"], trial["bandit_2"]["value"]]
         for trial in timeline
     ])
+
+
+def timeline_to_correct(timeline):
+    """Extract the correct-bandit label (1 or 2) for each trial.
+
+    Returns an integer array of shape (n_trials,).  This is metadata for
+    behavioural analysis — the model never sees it; it only learns from rewards.
+    """
+    return np.array([trial["correct"] for trial in timeline])
 
 
 def main():

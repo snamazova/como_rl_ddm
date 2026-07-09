@@ -6,5 +6,8 @@ validation_multi_case*.csv
 # ignore python cache files
 __pycache__/
 
+# ignore test artifacts
+test_*.png
+
 # ignore untracked paper PDF (kept locally)
 Paper.pdf
