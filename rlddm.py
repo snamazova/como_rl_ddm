@@ -23,6 +23,7 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass
 
+import hssm
 import numpy as np
 import pandas as pd
 from scipy import integrate, optimize, stats
@@ -267,9 +268,13 @@ def ddm_sample_trial(pars: dict,
                      rng: np.random.Generator | None = None) -> dict:
     """Sample one (choice, rt) pair.
 
-    Approximates the R WienR::rWDM sampler using an Euler-Maruyama path
-    integration.  The log-density function below is analytic, so likelihood
-    evaluation is still exact for the no-variability case.
+    Uses HSSM's fast DDM sampler when there is no inter-trial variability
+    (sv = sw = st0 = 0).  Falls back to an Euler-Maruyama approximation when
+    inter-trial variability is requested, because HSSM's simulate_data only
+    accepts the four core parameters (v, a, w, t0).
+
+    Choice encoding matches the rest of the file and WienR:
+        1 = lower boundary, 2 = upper boundary.
     """
     rng = rng or np.random.default_rng()
 
@@ -283,6 +288,24 @@ def ddm_sample_trial(pars: dict,
 
     _validate_ddm_pars(a, w, t0)
 
+    # Fast path: HSSM can sample the basic four-parameter DDM directly.
+    if sv == 0.0 and sw == 0.0 and st0 == 0.0:
+        # HSSM expects response -1/1; it returns one row per theta row.
+        seed = int(rng.integers(0, 2_147_483_647))
+        sim = hssm.simulate_data(
+            model="ddm",
+            theta=[[v, a, w, t0]],
+            size=1,
+            random_state=seed,
+            output_df=True,
+        )
+        rt = float(sim["rt"].iloc[0])
+        hssm_resp = float(sim["response"].iloc[0])
+        # HSSM: 1.0 -> upper, -1.0 -> lower.  Map to WienR convention.
+        choice = 2 if hssm_resp > 0 else 1
+        return {"choice": choice, "rt": rt}
+
+    # Slow path: Euler-Maruyama with trial-level variability.
     v_t = float(stats.norm.rvs(loc=v, scale=max(sv, 1e-12), random_state=rng) if sv > 0 else v)
     if sw > 0.0:
         w_t = rng.uniform(max(w - sw / 2.0, 1e-4), min(w + sw / 2.0, 1.0 - 1e-4))
@@ -295,8 +318,9 @@ def ddm_sample_trial(pars: dict,
 
     z = w_t * a
     dt = 1e-3
-    n_steps = int(20.0 / dt)  # t_max / dt
-    t_decision = None
+    n_steps = int(20.0 / dt)
+    choice = 2
+    t_decision = 20.0
     for step in range(n_steps):
         z += v_t * dt + rng.normal(0.0, np.sqrt(dt))
         if z >= a:
@@ -307,10 +331,6 @@ def ddm_sample_trial(pars: dict,
             t_decision = (step + 1) * dt
             choice = 1
             break
-    if t_decision is None:
-        # Default to upper boundary after max time (very rare with reasonable pars).
-        t_decision = 20.0
-        choice = 2
 
     rt = t0_t + t_decision
     return {"choice": int(choice), "rt": float(rt)}
