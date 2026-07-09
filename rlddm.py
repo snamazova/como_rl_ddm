@@ -27,6 +27,7 @@ import numpy as np
 import pandas as pd
 from scipy import integrate, optimize, stats
 import matplotlib.pyplot as plt
+import hssm 
 
 
 # =============================================================================
@@ -313,8 +314,35 @@ def ddm_sample_trial(pars: dict,
 
     rt = t0_t + t_decision
     return {"choice": int(choice), "rt": float(rt)}
+#jule: I added ddm_sample trial with hssm package
+def ddm_sample_trial2(pars):
+    """
+    Simulate one DDM trial using HSSM.
+    """
 
+    sim = hssm.simulate_data(
+        model="ddm",
+        theta=[
+            pars["v"],
+            pars["a"],
+            pars["w"],
+            pars["t0"],
+        ],
+        size=1,
+    )
 
+    rt = float(sim["rt"].iloc[0])
+
+    # HSSM returns responses as -1 and 1
+    response = int(sim["response"].iloc[0])
+
+    # Convert to the R coding
+    choice = 1 if response == -1 else 2
+
+    return {
+        "choice": choice,
+        "rt": rt,
+    }
 # =============================================================================
 # RL-DDM helper
 # =============================================================================
