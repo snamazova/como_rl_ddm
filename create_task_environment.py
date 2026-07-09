@@ -167,6 +167,19 @@ def plot_reward_distribution(timeline, reversal_points, num_trials, p_correct,
         plt.close(fig)
 
 
+def timeline_to_matrix(timeline):
+    """Convert a PRLT timeline into an (n_trials, 2) NumPy outcome matrix.
+
+    The first column is bandit_1 (Option 1 / orange), the second column is
+    bandit_2 (Option 2 / blue).  This matrix can be passed directly to the
+    RLDDM simulator as its `task_environment` argument.
+    """
+    return np.array([
+        [trial["bandit_1"]["value"], trial["bandit_2"]["value"]]
+        for trial in timeline
+    ])
+
+
 def main():
     args = parse_args()
 
