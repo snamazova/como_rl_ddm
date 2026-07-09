@@ -22,12 +22,11 @@ from __future__ import annotations
 
 import warnings
 
-import hssm
 import numpy as np
 import pandas as pd
 from scipy import integrate, stats
 import matplotlib.pyplot as plt
-import hssm 
+from ssms.basic_simulators.simulator import simulator as ssms_simulator
 
 
 # =============================================================================
@@ -255,15 +254,23 @@ def ddm_logpdf_trial(rt: float, choice: int, pars: dict,
 
 def ddm_sample_trial(pars: dict,
                      rng: np.random.Generator | None = None) -> dict:
-    """Sample one (choice, rt) pair.
+    """Sample one (choice, rt) pair from the 7-parameter DDM.
 
-    Uses HSSM's fast DDM sampler when there is no inter-trial variability
-    (sv = sw = st0 = 0).  Falls back to an Euler-Maruyama approximation when
-    inter-trial variability is requested, because HSSM's simulate_data only
-    accepts the four core parameters (v, a, w, t0).
+    Uses the ``full_ddm`` model from ``ssms`` (the simulator backend that
+    HSSM wraps).  This supports all inter-trial variability parameters
+    (sv, sw, st0) natively, so there is no need for an Euler-Maruyama
+    fallback.
 
-    Choice encoding matches the rest of the file and WienR:
-        1 = lower boundary, 2 = upper boundary.
+    Parameterisation note: ``ssms`` parametrises the DDM with the boundary
+    parameter as the *half*-boundary (boundaries at +/-a), so the full
+    boundary separation is 2*a.  WienR and the analytic density in this
+    module use ``a`` as the *full* boundary separation (boundaries at 0 and a).
+    We therefore pass ``a / 2`` to ssms.  The relative starting point ``w``
+    maps unchanged to ssms's ``z``.  The variability parameters map as:
+        sw -> sz  (starting-point variability, full range)
+        st0 -> st (non-decision-time variability, full range)
+
+    Choice encoding matches WienR: 1 = lower boundary, 2 = upper boundary.
     """
     rng = rng or np.random.default_rng()
 
@@ -277,88 +284,27 @@ def ddm_sample_trial(pars: dict,
 
     _validate_ddm_pars(a, w, t0)
 
-    # Fast path: HSSM can sample the basic four-parameter DDM directly.
-    # NOTE on parameterisation: HSSM (ssm_simulators) parametrises the DDM
-    # with the boundary parameter as the *half*-boundary (boundaries at +/-a),
-    # i.e. the full boundary separation is 2*a.  WienR and the analytic density
-    # in this module use ``a`` as the *full* boundary separation (boundaries at
-    # 0 and a).  We therefore pass ``a / 2`` to HSSM so the simulated process
-    # matches the likelihood.  The relative starting point ``w`` in (0, 1) maps
-    # unchanged to HSSM's ``z``.
-    if sv == 0.0 and sw == 0.0 and st0 == 0.0:
-        # HSSM expects response -1/1; it returns one row per theta row.
-        seed = int(rng.integers(0, 2_147_483_647))
-        sim = hssm.simulate_data(
-            model="ddm",
-            theta=[[v, a / 2.0, w, t0]],
-            size=1,
-            random_state=seed,
-            output_df=True,
-        )
-        rt = float(sim["rt"].iloc[0])
-        hssm_resp = float(sim["response"].iloc[0])
-        # HSSM: 1.0 -> upper, -1.0 -> lower.  Map to WienR convention.
-        choice = 2 if hssm_resp > 0 else 1
-        return {"choice": choice, "rt": rt}
-
-    # Slow path: Euler-Maruyama with trial-level variability.
-    v_t = float(stats.norm.rvs(loc=v, scale=max(sv, 1e-12), random_state=rng) if sv > 0 else v)
-    if sw > 0.0:
-        w_t = rng.uniform(max(w - sw / 2.0, 1e-4), min(w + sw / 2.0, 1.0 - 1e-4))
-    else:
-        w_t = w
-    if st0 > 0.0:
-        t0_t = rng.uniform(t0, t0 + st0)
-    else:
-        t0_t = t0
-
-    z = w_t * a
-    dt = 1e-3
-    n_steps = int(20.0 / dt)
-    choice = 2
-    t_decision = 20.0
-    for step in range(n_steps):
-        z += v_t * dt + rng.normal(0.0, np.sqrt(dt))
-        if z >= a:
-            t_decision = (step + 1) * dt
-            choice = 2
-            break
-        if z <= 0:
-            t_decision = (step + 1) * dt
-            choice = 1
-            break
-
-    rt = t0_t + t_decision
-    return {"choice": int(choice), "rt": float(rt)}
-#jule: I added ddm_sample trial with hssm package
-def ddm_sample_trial2(pars):
-    """
-    Simulate one DDM trial using HSSM.
-    """
-
-    sim = hssm.simulate_data(
-        model="ddm",
-        theta=[
-            pars["v"],
-            pars["a"],
-            pars["w"],
-            pars["t0"],
-        ],
-        size=1,
+    seed = int(rng.integers(0, 2_147_483_647))
+    result = ssms_simulator(
+        theta={
+            "v": v,
+            "a": a / 2.0,      # ssms uses half-boundary; WienR uses full
+            "z": w,             # relative starting point, same convention
+            "t": t0,            # non-decision time
+            "sz": sw,           # starting-point variability (full range)
+            "sv": sv,           # drift-rate variability (SD)
+            "st": st0,          # non-decision-time variability (full range)
+        },
+        model="full_ddm",
+        n_samples=1,
+        random_state=seed,
     )
+    rt = float(result["rts"][0, 0])
+    ssms_resp = int(result["choices"][0, 0])
+    # ssms: 1 -> upper, -1 -> lower.  Map to WienR convention.
+    choice = 2 if ssms_resp > 0 else 1
+    return {"choice": choice, "rt": rt}
 
-    rt = float(sim["rt"].iloc[0])
-
-    # HSSM returns responses as -1 and 1
-    response = int(sim["response"].iloc[0])
-
-    # Convert to the R coding
-    choice = 1 if response == -1 else 2
-
-    return {
-        "choice": choice,
-        "rt": rt,
-    }
 # =============================================================================
 # RL-DDM helper
 # =============================================================================
