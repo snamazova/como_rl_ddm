@@ -21,12 +21,11 @@ which is slower but mathematically equivalent.
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass
 
 import hssm
 import numpy as np
 import pandas as pd
-from scipy import integrate, optimize, stats
+from scipy import integrate, stats
 import matplotlib.pyplot as plt
 import hssm 
 
@@ -200,7 +199,12 @@ def ddm_logpdf_trial(rt: float, choice: int, pars: dict,
     if sv == 0.0 and sw == 0.0 and st0 == 0.0:
         return float(np.log(max(_pdf_decision_time(dt, v, a, w, choice), eps)))
 
-    # Slow path: integrate over v, w, t0.
+    # Slow path: marginalise over the inter-trial-variability dimensions.
+    # Only the dimensions with variability are integrated (point masses are
+    # used for the rest).  The drift-rate prior is Normal(v, sv); the starting
+    # point and non-decision time priors are Uniform.  The Gaussian weight is
+    # applied exactly once (inside the integrand), so there is no double
+    # counting.
     warnings.warn(
         "Inter-trial variability (sv/sw/st0 > 0) uses numerical quadrature; "
         "this is exact in principle but slow.",
@@ -208,60 +212,45 @@ def ddm_logpdf_trial(rt: float, choice: int, pars: dict,
         stacklevel=2,
     )
 
-    v_lo, v_hi = v - 5.0 * max(sv, 1.0), v + 5.0 * max(sv, 1.0)
+    # Integration domains for the active dimensions only.
+    ranges = []
+    if sv > 0.0:
+        ranges.append((v - 6.0 * sv, v + 6.0 * sv))
     if sw > 0.0:
-        w_lo = max(w - sw / 2.0, 1e-4)
-        w_hi = min(w + sw / 2.0, 1.0 - 1e-4)
-    else:
-        w_lo = w_hi = w
+        ranges.append((max(w - sw / 2.0, 1e-4), min(w + sw / 2.0, 1.0 - 1e-4)))
     if st0 > 0.0:
-        t0_lo = max(t0, 0.0)
-        t0_hi = t0 + st0
-    else:
-        t0_lo = t0_hi = t0
+        ranges.append((max(t0, 0.0), t0 + st0))
 
-    def integrand(v_: float, w_: float, t0_: float) -> float:
+    w_range = (max(w - sw / 2.0, 1e-4), min(w + sw / 2.0, 1.0 - 1e-4)) if sw > 0.0 else (w, w)
+    t0_range = (max(t0, 0.0), t0 + st0) if st0 > 0.0 else (t0, t0)
+    w_span = w_range[1] - w_range[0]
+    t0_span = t0_range[1] - t0_range[0]
+
+    def integrand(*args: float) -> float:
+        # args are supplied in the order: [v_] [w_] [t0_] for the active dims.
+        idx = 0
+        v_ = args[idx] if sv > 0.0 else v
+        if sv > 0.0:
+            idx += 1
+        w_ = args[idx] if sw > 0.0 else w
+        if sw > 0.0:
+            idx += 1
+        t0_ = args[idx] if st0 > 0.0 else t0
         dt_ = rt - t0_
-        if dt_ <= 0:
+        if dt_ <= 0.0:
             return 0.0
         dens = _pdf_decision_time(dt_, v_, a, w_, choice)
-        if sw > 0.0:
-            dens /= (w_hi - w_lo)
-        if st0 > 0.0:
-            dens /= (t0_hi - t0_lo)
         if sv > 0.0:
             dens *= stats.norm.pdf(v_, loc=v, scale=sv)
+        if sw > 0.0:
+            dens /= w_span
+        if st0 > 0.0:
+            dens /= t0_span
         return dens
 
-    if sv == 0.0 and sw == 0.0:
-        val, _ = integrate.quad(lambda tt: integrand(v, w, tt), t0_lo, t0_hi)
-    elif sv == 0.0 and st0 == 0.0:
-        val, _ = integrate.quad(lambda ww: integrand(v, ww, t0), w_lo, w_hi)
-    elif sw == 0.0 and st0 == 0.0:
-        val, _ = integrate.quad(lambda vv: integrand(vv, w, t0), v_lo, v_hi)
-    else:
-        def outer(vv: float) -> float:
-            inner, _ = integrate.dblquad(
-                lambda ww, tt: integrand(vv, ww, tt),
-                t0_lo, t0_hi,
-                lambda tt: w_lo, lambda tt: w_hi,
-            )
-            return stats.norm.pdf(vv, loc=v, scale=sv) * inner
-        val, _ = integrate.quad(outer, v_lo, v_hi)
+    val, _ = integrate.nquad(integrand, ranges)
 
     return float(np.log(max(val, eps)))
-
-
-def _cdf_decision_time(t: float, v: float, a: float, w: float, choice: int) -> float:
-    if t <= 0:
-        return 0.0
-    p_choice = _choice_probability(v, a, w, choice)
-    if p_choice <= 0:
-        return 0.0
-    val, _ = integrate.quad(lambda s: _pdf_decision_time(s, v, a, w, choice),
-                            0.0, t, limit=100)
-    return min(max(val / p_choice, 0.0), 1.0)
-
 
 
 def ddm_sample_trial(pars: dict,
@@ -289,12 +278,19 @@ def ddm_sample_trial(pars: dict,
     _validate_ddm_pars(a, w, t0)
 
     # Fast path: HSSM can sample the basic four-parameter DDM directly.
+    # NOTE on parameterisation: HSSM (ssm_simulators) parametrises the DDM
+    # with the boundary parameter as the *half*-boundary (boundaries at +/-a),
+    # i.e. the full boundary separation is 2*a.  WienR and the analytic density
+    # in this module use ``a`` as the *full* boundary separation (boundaries at
+    # 0 and a).  We therefore pass ``a / 2`` to HSSM so the simulated process
+    # matches the likelihood.  The relative starting point ``w`` in (0, 1) maps
+    # unchanged to HSSM's ``z``.
     if sv == 0.0 and sw == 0.0 and st0 == 0.0:
         # HSSM expects response -1/1; it returns one row per theta row.
         seed = int(rng.integers(0, 2_147_483_647))
         sim = hssm.simulate_data(
             model="ddm",
-            theta=[[v, a, w, t0]],
+            theta=[[v, a / 2.0, w, t0]],
             size=1,
             random_state=seed,
             output_df=True,
