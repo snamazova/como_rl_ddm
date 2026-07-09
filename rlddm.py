@@ -465,11 +465,20 @@ RLDDM_PRIORS = {
 
 
 def rlddm_log_prior(pars: dict, priors: dict | None = None) -> float:
-    """Sum of log-prior densities for the supplied parameters."""
+    """Sum of log-prior densities for the supplied parameters.
+
+    When inter-trial variability parameters (sv, sw, st0) are fixed at 0
+    (the default reduced model), they are skipped so that gamma/beta priors
+    with zero density at 0 do not produce ``-inf``.
+    """
     pars = fill_rlddm_pars(pars)
     priors = priors or RLDDM_PRIORS
     out = 0.0
     for name, dist in priors.items():
+        # Skip variability parameters when they are fixed at 0; the gamma/beta
+        # priors have zero density at 0, which would yield -inf.
+        if name in ("sv", "sw", "st0") and pars[name] == 0.0:
+            continue
         out += float(dist.logpdf(pars[name]))
     return out
 
@@ -542,7 +551,7 @@ def _plot_pred_errors(ax, fit):
     for i in range(len(x)):
         ax.plot([x[i], x[i]], [0, y[i]], color=RLDDM_COLOURS[choices[i] - 1], lw=1)
     ax.scatter(x, y, c=[RLDDM_COLOURS[c - 1] for c in choices], zorder=3)
-    ax.axhline(0, color="grey50", ls="--")
+    ax.axhline(0, color="0.5", ls="--")
     ax.set_xlabel("Trial")
     ax.set_ylabel("Prediction error")
     ax.set_title("Prediction errors")
@@ -560,7 +569,7 @@ def _plot_outcomes(ax, fit, task_environment=None, show_legend: bool = False,
     if task_environment is not None:
         te = np.asarray(task_environment)
         for i in range(te.shape[1]):
-            ax.plot(range(1, n_trials + 1), te[:, i], color="grey80", lw=1)
+            ax.plot(range(1, n_trials + 1), te[:, i], color="0.8", lw=1)
 
     choices = fit["data"]["choices"].to_numpy()
     ax.scatter(range(1, n_trials + 1), fit["data"]["outcomes"],
@@ -619,7 +628,7 @@ def _plot_ddm_schematic(ax, pars, colours=None, n_traces: int = 10,
         evidence = np.full_like(time, np.nan)
         start_idx = np.searchsorted(time, t0_i, side="left")
         evidence[start_idx] = w_i * a
-        colour = "grey70"
+        colour = "0.7"
         hit = False
         for j in range(start_idx + 1, n_steps + 1):
             evidence[j] = evidence[j - 1] + v_i * dt + rng.normal(0.0, np.sqrt(dt))
@@ -662,11 +671,11 @@ def _plot_rt_hists(ax, data, colours=None):
     ax.axhline(0, color="black", lw=0.5)
 
     for i in range(len(hu)):
-        ax.barh(0, width=edges_u[i + 1] - edges_u[i], height=hu[i],
-                left=edges_u[i], color=colours[1], edgecolor="white")
+        ax.bar(edges_u[i], hu[i], width=edges_u[i + 1] - edges_u[i],
+               align="edge", color=colours[1], edgecolor="white")
     for i in range(len(hl)):
-        ax.barh(0, width=edges_l[i + 1] - edges_l[i], height=-hl[i],
-                left=edges_l[i], color=colours[0], edgecolor="white")
+        ax.bar(edges_l[i], -hl[i], width=edges_l[i + 1] - edges_l[i],
+               align="edge", color=colours[0], edgecolor="white")
 
 
 def rlddm_plot(fit,
