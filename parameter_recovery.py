@@ -1,8 +1,10 @@
-"""Parameter recovery for the RLDDM.
+"""Parameter recovery for H1 and H2 models.
 
-Simulates synthetic data with known parameters, then fits the model by
-maximising the log-likelihood (via scipy.optimize.minimize) and checks
+Simulates data with known parameters, fits the model, and checks
 that the recovered parameters are close to the true ones.
+
+H1 (drift-only):  alpha, v_max, beta, a, w, t0
+H2 (boundary):   alpha, v_max, beta, a_base, kappa, tau, w, t0
 
 Usage:
     python parameter_recovery.py
@@ -14,115 +16,107 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
-from create_task_environment import generate_timeline, timeline_to_matrix
+from create_task_environment import generate_timeline, timeline_to_matrix, timeline_to_correct
 from rlddm import rlddm_simulate, rlddm_log_lik, fill_rlddm_pars
 
+RP = (36, 56, 71, 86, 106)
 
-# =============================================================================
-# Optimisation helpers
-# =============================================================================
+H1_PARAMS = ["alpha", "v_max", "beta", "a", "w", "t0"]
+H2_PARAMS = ["alpha", "v_max", "beta", "a_base", "kappa", "tau", "w", "t0"]
 
-# Parameters to optimise, their bounds, and unconstraining transforms.
-# We fix sv/sw/st0 at 0 for the basic model (matching the default).
-PARAM_NAMES = ["alpha", "v_intercept", "v_scale", "a", "w", "t0"]
-PARAM_BOUNDS = {
-    "alpha":       (1e-3, 0.999),
-    "v_intercept": (-3.0, 3.0),
-    "v_scale":     (1e-3, 5.0),
-    "a":           (0.5, 6.0),
-    "w":           (0.01, 0.99),
-    "t0":          (1e-3, 1.0),
+BOUNDS = {
+    "alpha":   (1e-3, 0.999),
+    "v_max":   (1e-3, 5.0),
+    "beta":    (1e-3, 5.0),
+    "a":       (0.5, 6.0),
+    "a_base":  (0.5, 6.0),
+    "kappa":   (1e-3, 5.0),
+    "tau":     (1e-3, 20.0),
+    "w":       (0.01, 0.99),
+    "t0":      (1e-3, 1.0),
 }
 
 
-def _unpack(theta: np.ndarray) -> dict:
-    """Convert an unconstrained vector back to a constrained parameter dict."""
+def _unpack(theta: np.ndarray, params: list) -> dict:
     pars = {}
-    for i, name in enumerate(PARAM_NAMES):
-        lo, hi = PARAM_BOUNDS[name]
-        # Sigmoid-style transform for bounded params, identity for unbounded
-        if name in ("alpha", "w"):
-            pars[name] = lo + (hi - lo) / (1.0 + np.exp(-theta[i]))
-        elif name in ("v_scale", "a", "t0"):
-            pars[name] = lo + (hi - lo) / (1.0 + np.exp(-theta[i]))
-        else:
-            pars[name] = np.clip(theta[i], lo, hi)
+    for i, name in enumerate(params):
+        lo, hi = BOUNDS[name]
+        pars[name] = lo + (hi - lo) / (1.0 + np.exp(-theta[i]))
     return pars
 
 
-def _neg_log_lik(theta: np.ndarray, data: pd.DataFrame) -> float:
-    """Negative log-likelihood for scipy.optimize.minimize."""
-    pars = _unpack(theta)
-    try:
-        ll = rlddm_log_lik(data, pars)
-    except (ValueError, FloatingPointError):
-        return 1e10
-    if not np.isfinite(ll):
-        return 1e10
-    return -ll
+def _pack(pars: dict, params: list) -> np.ndarray:
+    """Constrained -> unconstrained (inverse sigmoid)."""
+    theta = np.zeros(len(params))
+    for i, name in enumerate(params):
+        lo, hi = BOUNDS[name]
+        val = pars[name]
+        ratio = (val - lo) / (hi - lo)
+        ratio = np.clip(ratio, 1e-6, 1 - 1e-6)
+        theta[i] = np.log(ratio / (1 - ratio))
+    return theta
 
 
-def fit_rlddm(data: pd.DataFrame,
-               n_restarts: int = 5,
-               rng: np.random.Generator | None = None) -> dict:
-    """Fit the RLDDM to data via multi-start Nelder-Mead optimisation.
-
-    Returns the best-fitting parameter dict and the negative log-likelihood.
-    """
+def fit_model(model: str, data: pd.DataFrame,
+              n_restarts: int = 5,
+              rng: np.random.Generator | None = None) -> dict:
+    """Fit H1 or H2 via multi-start Nelder-Mead."""
     rng = rng or np.random.default_rng()
+    params = H1_PARAMS if model == "H1" else H2_PARAMS
+
+    def neg_ll(theta):
+        pars = _unpack(theta, params)
+        try:
+            ll = rlddm_log_lik(data, pars, reversal_points=RP)
+        except (ValueError, FloatingPointError):
+            return 1e10
+        return -ll if np.isfinite(ll) else 1e10
+
+    # Informed starting point near default values
+    informed = {"alpha": 0.0, "v_max": 0.5, "beta": 0.0,
+                "a": 0.5, "a_base": 0.5, "kappa": 0.0,
+                "tau": 0.0, "w": 0.0, "t0": 0.0}
+    start_informed = np.array([informed[p] for p in params])
 
     best_ll = np.inf
     best_pars = None
 
-    for _ in range(n_restarts):
-        # Random starting point in unconstrained space
-        theta0 = rng.normal(0.0, 1.0, size=len(PARAM_NAMES))
-
-        result = minimize(
-            _neg_log_lik,
-            theta0,
-            args=(data,),
-            method="Nelder-Mead",
-            options={"maxiter": 5000, "xatol": 1e-6, "fatol": 1e-6},
-        )
-
+    for i in range(n_restarts):
+        if i == 0:
+            theta0 = start_informed
+        elif i == 1:
+            theta0 = start_informed + rng.normal(0, 0.3, size=len(params))
+        else:
+            theta0 = rng.normal(0.0, 1.0, size=len(params))
+        result = minimize(neg_ll, theta0, method="Nelder-Mead",
+                          options={"maxiter": 8000, "xatol": 1e-6, "fatol": 1e-6})
         if result.fun < best_ll:
             best_ll = result.fun
-            best_pars = _unpack(result.x)
+            best_pars = _unpack(result.x, params)
 
     return {"pars": best_pars, "neg_ll": best_ll}
 
 
-# =============================================================================
-# Recovery experiment
-# =============================================================================
-
-def run_recovery(true_pars: dict,
-                 n_trials: int = 140,
-                 n_restarts: int = 5,
-                 rng_seed: int = 42) -> dict:
-    """Simulate data with true_pars, fit the model, and return comparison."""
-    rng = np.random.default_rng(rng_seed)
-
-    # 1. Generate PRLT timeline and simulate data
-    timeline = generate_timeline(
-        num_trials=n_trials,
-        seed=rng_seed,
-        reversed_state=True,
-    )
+def run_recovery(model: str, true_pars: dict,
+                 n_restarts: int = 5, seed: int = 42) -> dict:
+    """Simulate under model, fit same model, compare."""
+    rng = np.random.default_rng(seed)
+    timeline = generate_timeline(num_trials=140, seed=seed, reversed_state=True,
+                                  reversal_points=RP)
     env = timeline_to_matrix(timeline)
-    sim = rlddm_simulate(env, true_pars, rng=rng)
+    correct = timeline_to_correct(timeline)
+
+    sim = rlddm_simulate(env, true_pars, rng=rng,
+                          correct_bandit=correct, reversal_points=RP)
     data = sim["data"]
 
-    # 2. Fit the model
-    fit = fit_rlddm(data, n_restarts=n_restarts, rng=rng)
-
-    # 3. Compare
+    fit = fit_model(model, data, n_restarts=n_restarts, rng=rng)
     recovered = fit["pars"]
     true_filled = fill_rlddm_pars(true_pars)
 
+    params = H1_PARAMS if model == "H1" else H2_PARAMS
     comparison = {}
-    for name in PARAM_NAMES:
+    for name in params:
         comparison[name] = {
             "true": true_filled[name],
             "recovered": recovered[name],
@@ -130,17 +124,16 @@ def run_recovery(true_pars: dict,
         }
 
     return {
+        "model": model,
         "comparison": comparison,
-        "true_neg_ll": -rlddm_log_lik(data, true_pars),
+        "true_neg_ll": -rlddm_log_lik(data, true_pars, reversal_points=RP),
         "fitted_neg_ll": fit["neg_ll"],
-        "n_trials": n_trials,
     }
 
 
 def print_results(result: dict, label: str = ""):
-    """Pretty-print a recovery result."""
     print(f"\n{'=' * 60}")
-    print(f"Parameter Recovery: {label}")
+    print(f"Parameter Recovery: {label} ({result['model']})")
     print(f"{'=' * 60}")
     print(f"{'Parameter':<14} {'True':>10} {'Recovered':>10} {'Abs Error':>10}")
     print("-" * 48)
@@ -150,42 +143,21 @@ def print_results(result: dict, label: str = ""):
     print("-" * 48)
     print(f"{'True neg-LL:':<20} {result['true_neg_ll']:.4f}")
     print(f"{'Fitted neg-LL:':<20} {result['fitted_neg_ll']:.4f}")
-    print(f"{'LL improvement:':<20} {result['true_neg_ll'] - result['fitted_neg_ll']:.4f}")
-
-    # Overall pass/fail threshold
     max_err = max(v["abs_error"] for v in result["comparison"].values())
     status = "PASS" if max_err < 0.25 else "CHECK"
     print(f"{'Max abs error:':<20} {max_err:.4f}  -> {status}")
 
 
-# =============================================================================
-# Main: run multiple recovery experiments
-# =============================================================================
-
 if __name__ == "__main__":
-    test_cases = [
-        {
-            "label": "moderate learning, moderate drift",
-            "pars": {"alpha": 0.25, "v_intercept": 0.0, "v_scale": 1.0,
-                     "a": 3.0, "w": 0.5, "t0": 0.25},
-        },
-        {
-            "label": "fast learning, strong drift",
-            "pars": {"alpha": 0.5, "v_intercept": 0.0, "v_scale": 2.0,
-                     "a": 2.0, "w": 0.5, "t0": 0.2},
-        },
-        {
-            "label": "slow learning, weak drift",
-            "pars": {"alpha": 0.1, "v_intercept": 0.0, "v_scale": 0.5,
-                     "a": 3.0, "w": 0.6, "t0": 0.3},
-        },
-    ]
+    # H1 recovery
+    h1_true = {"alpha": 0.25, "v_max": 2.0, "beta": 1.0, "a": 3.0, "w": 0.5, "t0": 0.25}
+    print("Fitting H1 recovery...")
+    r1 = run_recovery("H1", h1_true, n_restarts=5, seed=42)
+    print_results(r1, "H1 (drift-only)")
 
-    for case in test_cases:
-        result = run_recovery(
-            true_pars=case["pars"],
-            n_trials=140,
-            n_restarts=8,
-            rng_seed=42,
-        )
-        print_results(result, label=case["label"])
+    # H2 recovery
+    h2_true = {"alpha": 0.25, "v_max": 2.0, "beta": 1.0, "a_base": 3.0,
+               "kappa": 2.0, "tau": 5.0, "w": 0.5, "t0": 0.25}
+    print("\nFitting H2 recovery...")
+    r2 = run_recovery("H2", h2_true, n_restarts=5, seed=42)
+    print_results(r2, "H2 (boundary-only)")

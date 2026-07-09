@@ -32,10 +32,10 @@ from ssms.basic_simulators.simulator import simulator as ssms_simulator
 # Default parameters
 # =============================================================================
 
-RLDDM_DEFAULTS = {
+RLDDM_DEFAULTS_H1 = {
     "alpha": 0.25,
-    "v_intercept": 0.0,
-    "v_scale": 1.0,
+    "v_max": 2.0,
+    "beta": 1.0,
     "a": 3.0,
     "w": 0.5,
     "t0": 0.25,
@@ -44,13 +44,37 @@ RLDDM_DEFAULTS = {
     "st0": 0.0,
 }
 
+RLDDM_DEFAULTS_H2 = {
+    "alpha": 0.25,
+    "v_max": 2.0,
+    "beta": 1.0,
+    "a_base": 3.0,
+    "kappa": 1.0,
+    "tau": 5.0,
+    "w": 0.5,
+    "t0": 0.25,
+    "sv": 0.0,
+    "sw": 0.0,
+    "st0": 0.0,
+}
+
+# Backward-compatible alias (uses H1 parameter set)
+RLDDM_DEFAULTS = RLDDM_DEFAULTS_H1
+
 
 def fill_rlddm_pars(pars: dict | None = None, defaults: dict | None = None) -> dict:
-    """Merge user-supplied parameters with defaults (same logic as R version)."""
+    """Merge user-supplied parameters with defaults.
+
+    Auto-detects the model variant: if ``kappa`` is present in ``pars``,
+    uses H2 defaults (time-varying boundary); otherwise uses H1 defaults.
+    """
     if pars is None:
         pars = {}
     if defaults is None:
-        defaults = RLDDM_DEFAULTS.copy()
+        if "kappa" in pars or "a_base" in pars:
+            defaults = RLDDM_DEFAULTS_H2.copy()
+        else:
+            defaults = RLDDM_DEFAULTS_H1.copy()
     out = dict(defaults)
     out.update(pars)
     return out
@@ -121,26 +145,24 @@ def _choice_probability(v: float, a: float, w: float, choice: int) -> float:
 
 
 def _pdf_small_time(t: float, v: float, a: float, w: float, choice: int,
-                    k_max: int = 50) -> float:
+                    k_max: int = 20) -> float:
     """Small-time FPT density (Navarro & Fuss, 2009)."""
     if t <= 0:
         return 0.0
 
-    # upper -> lower with flipped parameters
     if choice == 2:
         v, w = -v, 1.0 - w
 
     pre = a * np.exp(-v * a * w - 0.5 * v * v * t) / np.sqrt(2.0 * np.pi * t ** 3)
-    s = 0.0
+    k = np.arange(-k_max, k_max + 1)
+    x = w + 2.0 * k
     scale = (a * a) / t
-    for k in range(-k_max, k_max + 1):
-        x = w + 2.0 * k
-        s += x * np.exp(-0.5 * scale * x * x)
+    s = np.sum(x * np.exp(-0.5 * scale * x * x))
     return float(pre * s)
 
 
 def _pdf_large_time(t: float, v: float, a: float, w: float, choice: int,
-                    k_max: int = 50) -> float:
+                    k_max: int = 20) -> float:
     """Large-time FPT density (Navarro & Fuss, 2009)."""
     if t <= 0:
         return 0.0
@@ -149,15 +171,14 @@ def _pdf_large_time(t: float, v: float, a: float, w: float, choice: int,
         v, w = -v, 1.0 - w
 
     pre = (np.pi / (a * a)) * np.exp(-v * a * w - 0.5 * v * v * t)
-    s = 0.0
+    k = np.arange(1, k_max + 1)
     decay = (np.pi * np.pi * t) / (2.0 * a * a)
-    for k in range(1, k_max + 1):
-        s += k * np.sin(k * np.pi * w) * np.exp(-k * k * decay)
+    s = np.sum(k * np.sin(k * np.pi * w) * np.exp(-k * k * decay))
     return float(pre * s)
 
 
 def _pdf_decision_time(t: float, v: float, a: float, w: float,
-                       choice: int, k_max: int = 50) -> float:
+                       choice: int, k_max: int = 20) -> float:
     """FPT density; switches between small- and large-time representations."""
     if t <= 0:
         return 0.0
@@ -179,7 +200,7 @@ def ddm_logpdf_trial(rt: float, choice: int, pars: dict,
     if choice not in (1, 2):
         raise ValueError("choice must be 1 (lower) or 2 (upper)")
 
-    a = pars["a"]
+    a = pars.get("a", pars.get("a_base", 3.0))
     v = pars["v"]
     w = pars["w"]
     t0 = pars["t0"]
@@ -262,7 +283,7 @@ def ddm_sample_trial(pars: dict,
     """
     rng = rng or np.random.default_rng()
 
-    a = pars["a"]
+    a = pars.get("a", pars.get("a_base", 3.0))
     v = pars["v"]
     w = pars["w"]
     t0 = pars["t0"]
@@ -297,9 +318,28 @@ def ddm_sample_trial(pars: dict,
 # =============================================================================
 
 def compute_drift(values: np.ndarray, pars: dict) -> float:
-    """Drift rate = v_intercept + v_scale * (value_2 - value_1)."""
-    value_diff = values[1] - values[0]
-    return float(pars["v_intercept"] + pars["v_scale"] * value_diff)
+    """Drift rate: v = v_max · tanh(β · ΔQ).
+
+    Saturates at ±v_max for large value differences, so the drift rate
+    stays bounded even when one option is clearly better.
+    """
+    delta_Q = values[1] - values[0]
+    return float(pars["v_max"] * np.tanh(pars["beta"] * delta_Q))
+
+
+def compute_boundary(pars: dict, trial_since_reversal: int | None = None) -> float:
+    """Boundary separation for the current trial.
+
+    H1 (constant): a = pars["a"].
+    H2 (time-varying): a = a_base + κ · exp(-trial_since_reversal / τ),
+    which increases after a reversal then decays back to baseline.
+    """
+    if "kappa" in pars:
+        if trial_since_reversal is None or trial_since_reversal < 0:
+            return float(pars["a_base"])
+        return float(pars["a_base"] + pars["kappa"] *
+                      np.exp(-trial_since_reversal / pars["tau"]))
+    return float(pars["a"])
 
 
 # =============================================================================
@@ -330,8 +370,16 @@ def rlddm_simulate(task_environment: pd.DataFrame | np.ndarray,
     n_trials, n_options = task_environment.shape
     initial_values = np.asarray(initial_values, dtype=float)
 
+    # Compute trials-since-reversal for each trial (needed for H2 boundary)
+    rp = list(reversal_points) if reversal_points is not None else []
+    tsr = np.zeros(n_trials, dtype=int)
+    for t in range(n_trials):
+        past_reversals = [r for r in rp if r <= t]
+        tsr[t] = (t - max(past_reversals)) if past_reversals else -1
+
     values = np.full((n_trials, n_options), np.nan)
     drifts = np.zeros(n_trials)
+    boundaries = np.zeros(n_trials)
     choices = np.zeros(n_trials, dtype=int)
     RTs = np.zeros(n_trials)
     outcomes = np.zeros(n_trials)
@@ -341,8 +389,10 @@ def rlddm_simulate(task_environment: pd.DataFrame | np.ndarray,
 
     for t in range(n_trials):
         drifts[t] = compute_drift(values[t, :], pars)
+        boundaries[t] = compute_boundary(pars, tsr[t])
         pars_t = dict(pars)
         pars_t["v"] = drifts[t]
+        pars_t["a"] = boundaries[t]
 
         sim = ddm_sample_trial(pars_t, rng=rng)
         choices[t] = sim["choice"]
@@ -365,7 +415,6 @@ def rlddm_simulate(task_environment: pd.DataFrame | np.ndarray,
         "outcomes": outcomes,
     })
 
-    # Behavioural metadata: did the participant choose the correct bandit?
     if correct_bandit is not None:
         is_correct = (choices == np.asarray(correct_bandit)).astype(int)
         data["is_correct"] = is_correct
@@ -379,6 +428,7 @@ def rlddm_simulate(task_environment: pd.DataFrame | np.ndarray,
         "data": data,
         "values": values,
         "drifts": drifts,
+        "boundaries": boundaries,
         "prediction_errors": prediction_errors,
         "parameters": parameters,
         "task_environment": task_environment,
@@ -389,7 +439,8 @@ def rlddm_simulate(task_environment: pd.DataFrame | np.ndarray,
 
 def rlddm_run(data: pd.DataFrame,
               pars: dict,
-              initial_values: tuple | list | np.ndarray = (0.0, 0.0)) -> dict:
+              initial_values: tuple | list | np.ndarray = (0.0, 0.0),
+              reversal_points: tuple | list | None = None) -> dict:
     """Compute trial-by-trial log-likelihoods for observed choices and RTs."""
     pars = fill_rlddm_pars(pars)
 
@@ -401,8 +452,16 @@ def rlddm_run(data: pd.DataFrame,
     n_options = len(initial_values)
     initial_values = np.asarray(initial_values, dtype=float)
 
+    # Compute trials-since-reversal for each trial (needed for H2 boundary)
+    rp = list(reversal_points) if reversal_points is not None else []
+    tsr = np.zeros(n_trials, dtype=int)
+    for t in range(n_trials):
+        past_reversals = [r for r in rp if r <= t]
+        tsr[t] = (t - max(past_reversals)) if past_reversals else -1
+
     values = np.full((n_trials, n_options), np.nan)
     drifts = np.zeros(n_trials)
+    boundaries = np.zeros(n_trials)
     prediction_errors = np.zeros(n_trials)
     log_lik = np.zeros(n_trials)
 
@@ -410,8 +469,10 @@ def rlddm_run(data: pd.DataFrame,
 
     for t in range(n_trials):
         drifts[t] = compute_drift(values[t, :], pars)
+        boundaries[t] = compute_boundary(pars, tsr[t])
         pars_t = dict(pars)
         pars_t["v"] = drifts[t]
+        pars_t["a"] = boundaries[t]
 
         log_lik[t] = ddm_logpdf_trial(
             rt=RTs[t],
@@ -434,6 +495,7 @@ def rlddm_run(data: pd.DataFrame,
         "data": data,
         "values": values,
         "drifts": drifts,
+        "boundaries": boundaries,
         "prediction_errors": prediction_errors,
         "log_lik": log_lik,
         "summed_log_lik": summed_log_lik,
@@ -442,9 +504,11 @@ def rlddm_run(data: pd.DataFrame,
 
 
 def rlddm_log_lik(data: pd.DataFrame, pars: dict,
-                  initial_values: tuple | list | np.ndarray = (0.0, 0.0)) -> float:
+                  initial_values: tuple | list | np.ndarray = (0.0, 0.0),
+                  reversal_points: tuple | list | None = None) -> float:
     """Convenience wrapper returning only the summed log-likelihood."""
-    fit = rlddm_run(data, pars, initial_values=initial_values)
+    fit = rlddm_run(data, pars, initial_values=initial_values,
+                    reversal_points=reversal_points)
     return fit["summed_log_lik"]
 
 
@@ -460,11 +524,14 @@ def rlddm_log_lik(data: pd.DataFrame, pars: dict,
 #   beta(shape1=2, shape2=8)      -> stats.beta(2, 8)
 RLDDM_PRIORS = {
     "alpha": stats.beta(5, 5),
-    "v_intercept": stats.norm(0.0, 0.5),
-    "v_scale": stats.gamma(2.0, scale=1.0),   # shape=2, rate=1
-    "a": stats.gamma(10.0, scale=0.25),        # shape=10, scale=0.25
+    "v_max": stats.gamma(2.0, scale=1.0),
+    "beta": stats.gamma(2.0, scale=1.0),
+    "a": stats.gamma(10.0, scale=0.25),
+    "a_base": stats.gamma(10.0, scale=0.25),
+    "kappa": stats.gamma(2.0, scale=0.5),
+    "tau": stats.gamma(5.0, scale=2.0),
     "w": stats.beta(20, 20),
-    "t0": stats.gamma(20.0, scale=0.015),     # shape=20, scale=0.015
+    "t0": stats.gamma(20.0, scale=0.015),
     "sv": stats.gamma(2.0, scale=0.25),
     "sw": stats.beta(2, 8),
     "st0": stats.gamma(2.0, scale=0.05),
@@ -508,19 +575,18 @@ RLDDM_SHAPES = ["s", "o"]
 def _parameter_label(parameters: dict) -> str:
     pars = parameters
     label = [
-        f"alpha = {pars['alpha']:.2f}",
-        f"v_0 = {pars['v_intercept']:.2f}",
-        f"v_scale = {pars['v_scale']:.2f}",
-        f"a = {pars['a']:.2f}",
-        f"w = {pars['w']:.2f}",
-        f"t0 = {pars['t0']:.2f}",
+        f"alpha = {pars.get('alpha', 0):.2f}",
+        f"v_max = {pars.get('v_max', 0):.2f}",
+        f"beta = {pars.get('beta', 0):.2f}",
     ]
-    if pars.get("sv", 0.0) > 0.0:
-        label.append(f"sv = {pars['sv']:.2f}")
-    if pars.get("sw", 0.0) > 0.0:
-        label.append(f"sw = {pars['sw']:.2f}")
-    if pars.get("st0", 0.0) > 0.0:
-        label.append(f"st0 = {pars['st0']:.2f}")
+    if "a" in pars:
+        label.append(f"a = {pars['a']:.2f}")
+    if "a_base" in pars:
+        label.append(f"a_base = {pars['a_base']:.2f}")
+        label.append(f"kappa = {pars.get('kappa', 0):.2f}")
+        label.append(f"tau = {pars.get('tau', 0):.2f}")
+    label.append(f"w = {pars.get('w', 0):.2f}")
+    label.append(f"t0 = {pars.get('t0', 0):.2f}")
     return "    ".join(label)
 
 
@@ -547,7 +613,7 @@ def _plot_values(ax, fit, show_legend: bool = False,
 def _plot_drifts(ax, fit, reversal_points: list | None = None):
     n_trials = len(fit["drifts"])
     ax.plot(range(1, n_trials + 1), fit["drifts"], color="black", lw=2)
-    ax.axhline(fit["parameters"]["v_intercept"], color="grey", ls="--")
+    ax.axhline(0, color="grey", ls="--")
     if reversal_points:
         for rev in reversal_points:
             ax.axvline(rev, color="gray", ls="--", lw=0.8)
@@ -612,7 +678,7 @@ def _plot_ddm_schematic(ax, pars, colours=None, n_traces: int = 10,
         rng = np.random.default_rng()
 
     colours = colours or RLDDM_COLOURS
-    a = pars["a"]
+    a = pars.get("a", pars.get("a_base", 3.0))
     v = pars["v"]
     w = pars["w"]
     t0 = pars["t0"]
@@ -760,13 +826,13 @@ if __name__ == "__main__":
     env = timeline_to_matrix(timeline)
     correct = timeline_to_correct(timeline)
 
-    pars = {"alpha": 0.25, "v_intercept": 0.0, "v_scale": 1.0,
+    pars = {"alpha": 0.25, "v_max": 2.0, "beta": 1.0,
             "a": 3.0, "w": 0.5, "t0": 0.25}
     fit = rlddm_simulate(env, pars, rng=rng, correct_bandit=correct,
                          reversal_points=reversal_points)
     print("Simulated", len(fit["data"]), "trials from the PRLT environment")
     print("Mean log-lik of simulated data under true pars:",
-          rlddm_log_lik(fit["data"], pars) / len(fit["data"]))
+          rlddm_log_lik(fit["data"], pars, reversal_points=reversal_points) / len(fit["data"]))
     print("Overall accuracy:", fit["data"]["is_correct"].mean())
     print("First 5 trials:")
     print(fit["data"].head())
