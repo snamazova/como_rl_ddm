@@ -5,10 +5,6 @@ produces a 2×2 confusion matrix showing which model wins (by BIC) in each
 cell. A perfect confusion matrix is diagonal — each model recovers its own
 data-generating process.
 
-Research question:
-    Does post-reversal slowing reflect drift collapse (H1) or boundary
-    increase (H2)?
-
 Usage:
     python confusion_matrix.py
 """
@@ -17,214 +13,111 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
+import matplotlib.pyplot as plt
 
 from create_task_environment import (
-    generate_timeline,
-    timeline_to_matrix,
-    timeline_to_correct,
+    generate_timeline, timeline_to_matrix, timeline_to_correct,
 )
-from rlddm import rlddm_simulate, rlddm_log_lik, fill_rlddm_pars
+from rlddm import (
+    rlddm_simulate, fit_model,
+    H1_DEFAULTS, H2_DEFAULTS, REVERSAL_POINTS,
+)
 
 
-# =============================================================================
-# Parameter sets
-# =============================================================================
-
-H1_TRUE = {"alpha": 0.25, "v_max": 2.0, "beta": 1.0, "a": 3.0, "w": 0.5, "t0": 0.25}
-H2_TRUE = {"alpha": 0.25, "v_max": 2.0, "beta": 1.0, "a_base": 3.0,
-           "kappa": 2.0, "tau": 5.0, "w": 0.5, "t0": 0.25}
-
-H1_PARAMS = ["alpha", "v_max", "beta", "a", "w", "t0"]
-H2_PARAMS = ["alpha", "v_max", "beta", "a_base", "kappa", "tau", "w", "t0"]
-
-BOUNDS = {
-    "alpha":   (1e-3, 0.999),
-    "v_max":   (1e-3, 5.0),
-    "beta":    (1e-3, 5.0),
-    "a":       (0.5, 6.0),
-    "a_base":  (0.5, 6.0),
-    "kappa":   (1e-3, 5.0),
-    "tau":     (1e-3, 20.0),
-    "w":       (0.01, 0.99),
-    "t0":      (1e-3, 1.0),
-}
+RP = REVERSAL_POINTS
 
 
-# =============================================================================
-# Fitting
-# =============================================================================
-
-def _unpack(theta: np.ndarray, param_names: list) -> dict:
-    pars = {}
-    for i, name in enumerate(param_names):
-        lo, hi = BOUNDS[name]
-        pars[name] = lo + (hi - lo) / (1.0 + np.exp(-theta[i]))
-    return pars
-
-
-def fit_model(model: str,
-              data: pd.DataFrame,
-              reversal_points: tuple,
-              n_restarts: int = 5,
-              rng: np.random.Generator | None = None) -> dict:
-    """Fit H1 or H2 to data via multi-start Nelder-Mead optimisation.
-
-    Uses a mix of random starts and informed starts (near plausible
-    parameter values) to avoid the optimizer getting stuck.
-    """
-    rng = rng or np.random.default_rng()
-
-    if model == "H1":
-        params = H1_PARAMS
-    elif model == "H2":
-        params = H2_PARAMS
-    else:
-        raise ValueError(f"Unknown model: {model}")
-
-    def neg_ll(theta):
-        pars = _unpack(theta, params)
-        try:
-            ll = rlddm_log_lik(data, pars, reversal_points=reversal_points)
-        except (ValueError, FloatingPointError):
-            return 1e10
-        return -ll if np.isfinite(ll) else 1e10
-
-    # Informed starting points (unconstrained space, roughly centered)
-    informed_starts = {
-        "alpha": 0.0, "v_max": 0.5, "beta": 0.0,
-        "a": 0.5, "a_base": 0.5, "kappa": 0.0, "tau": 0.0,
-        "w": 0.0, "t0": 0.0,
-    }
-    start_informed = np.array([informed_starts[p] for p in params])
-
-    best_ll = np.inf
-    best_pars = None
-
-    for i in range(n_restarts):
-        if i == 0:
-            theta0 = start_informed
-        elif i == 1:
-            theta0 = start_informed + rng.normal(0, 0.3, size=len(params))
-        else:
-            theta0 = rng.normal(0.0, 1.0, size=len(params))
-        result = minimize(neg_ll, theta0, method="Nelder-Mead",
-                          options={"maxiter": 8000, "xatol": 1e-6, "fatol": 1e-6})
-        if result.fun < best_ll:
-            best_ll = result.fun
-            best_pars = _unpack(result.x, params)
-
-    n_trials = len(data)
-    bic = 2 * best_ll + len(params) * np.log(n_trials)
-
-    return {"model": model, "pars": best_pars, "log_lik": -best_ll,
-            "n_params": len(params), "bic": float(bic)}
-
-
-# =============================================================================
-# Confusion matrix
-# =============================================================================
-
-def run_confusion_matrix(n_subjects: int = 10,
-                         n_trials: int = 140,
-                         n_restarts: int = 5,
-                         seed: int = 42) -> dict:
-    """Run the full 2×2 confusion matrix experiment.
-
-    1. Simulate data under H1 and H2.
-    2. Fit both models to both datasets.
-    3. Return BICs and winning model for each cell.
-    """
-    rp = (36, 56, 71, 86, 106)
+def run_confusion_matrix(n_subjects=10, n_restarts=3, seed=42):
+    """Run the full 2×2 confusion matrix experiment."""
     rng = np.random.default_rng(seed)
 
-    # Shared timeline
-    timeline = generate_timeline(num_trials=n_trials, seed=seed,
-                                 reversed_state=True, reversal_points=rp)
+    timeline = generate_timeline(num_trials=140, seed=seed, reversed_state=True,
+                                  reversal_points=RP)
     env = timeline_to_matrix(timeline)
     correct = timeline_to_correct(timeline)
 
-    # Simulate two datasets
     print(f"Simulating {n_subjects} subjects under H1...")
-    h1_data = []
-    for s in range(n_subjects):
-        sim = rlddm_simulate(env, H1_TRUE, rng=np.random.default_rng(seed + s),
-                             correct_bandit=correct, reversal_points=rp)
-        h1_data.append(sim["data"])
+    h1_data = [rlddm_simulate(env, H1_DEFAULTS, rng=np.random.default_rng(seed + s),
+                              correct_bandit=correct, reversal_points=RP)["data"]
+               for s in range(n_subjects)]
 
     print(f"Simulating {n_subjects} subjects under H2...")
-    h2_data = []
-    for s in range(n_subjects):
-        sim = rlddm_simulate(env, H2_TRUE, rng=np.random.default_rng(seed + 100 + s),
-                             correct_bandit=correct, reversal_points=rp)
-        h2_data.append(sim["data"])
+    h2_data = [rlddm_simulate(env, H2_DEFAULTS, rng=np.random.default_rng(seed + 100 + s),
+                              correct_bandit=correct, reversal_points=RP)["data"]
+               for s in range(n_subjects)]
 
-    # Fit both models to both datasets
-    results = {}
-    for data_label, dataset in [("H1_data", h1_data), ("H2_data", h2_data)]:
-        print(f"\nFitting models to {data_label}...")
-        # Aggregate across subjects (sum BICs)
-        bic_h1_total = 0
-        bic_h2_total = 0
-        ll_h1_total = 0
-        ll_h2_total = 0
+    # Fit both models, count wins (only successful fits)
+    h1_h1_wins, h1_h2_wins = 0, 0
+    h2_h1_wins, h2_h2_wins = 0, 0
 
-        for s, data in enumerate(dataset):
-            fit_h1 = fit_model("H1", data, rp, n_restarts=n_restarts, rng=rng)
-            fit_h2 = fit_model("H2", data, rp, n_restarts=n_restarts, rng=rng)
-            bic_h1_total += fit_h1["bic"]
-            bic_h2_total += fit_h2["bic"]
-            ll_h1_total += fit_h1["log_lik"]
-            ll_h2_total += fit_h2["log_lik"]
-            print(f"  Subject {s}: H1 BIC={fit_h1['bic']:.1f}, H2 BIC={fit_h2['bic']:.1f}")
+    for s, data in enumerate(h1_data):
+        f1 = fit_model("H1", data, RP, n_restarts=n_restarts, rng=rng)
+        f2 = fit_model("H2", data, RP, n_restarts=n_restarts, rng=rng)
+        if f1["bic"] < 1e6 and f2["bic"] < 1e6:
+            if f1["bic"] < f2["bic"]:
+                h1_h1_wins += 1
+            else:
+                h1_h2_wins += 1
+        print(f"  H1 data s{s}: H1={f1['bic']:.0f} H2={f2['bic']:.0f}")
 
-        winner = "H1" if bic_h1_total < bic_h2_total else "H2"
-        results[data_label] = {
-            "H1_bic": bic_h1_total,
-            "H2_bic": bic_h2_total,
-            "H1_ll": ll_h1_total,
-            "H2_ll": ll_h2_total,
-            "winner": winner,
-        }
+    for s, data in enumerate(h2_data):
+        f1 = fit_model("H1", data, RP, n_restarts=n_restarts, rng=rng)
+        f2 = fit_model("H2", data, RP, n_restarts=n_restarts, rng=rng)
+        if f1["bic"] < 1e6 and f2["bic"] < 1e6:
+            if f1["bic"] < f2["bic"]:
+                h2_h1_wins += 1
+            else:
+                h2_h2_wins += 1
+        print(f"  H2 data s{s}: H1={f1['bic']:.0f} H2={f2['bic']:.0f}")
 
-    return results
+    return {
+        "H1_data": {"H1_wins": h1_h1_wins, "H2_wins": h1_h2_wins},
+        "H2_data": {"H1_wins": h2_h1_wins, "H2_wins": h2_h2_wins},
+    }
 
 
-def print_confusion_matrix(results: dict):
-    """Print the 2×2 confusion matrix."""
-    print(f"\n{'=' * 55}")
-    print("Confusion Matrix (BIC, summed across subjects)")
-    print(f"{'=' * 55}")
-    print(f"{'':>12} {'Fit H1':>15} {'Fit H2':>15} {'Winner':>10}")
-    print("-" * 55)
+def print_confusion_matrix(results):
+    print(f"\n{'=' * 50}")
+    print("Confusion Matrix (win counts)")
+    print(f"{'=' * 50}")
+    print(f"{'':>12} {'H1 wins':>10} {'H2 wins':>10}")
+    print("-" * 35)
+    for label in ["H1_data", "H2_data"]:
+        r = results[label]
+        print(f"{label:>12} {r['H1_wins']:>10} {r['H2_wins']:>10}")
+    print("-" * 35)
 
-    for data_label in ["H1_data", "H2_data"]:
-        r = results[data_label]
-        print(f"{data_label:>12} {r['H1_bic']:>15.1f} {r['H2_bic']:>15.1f} {r['winner']:>10}")
-
-    print("-" * 55)
-
-    # Check if diagonal
-    h1_correct = results["H1_data"]["winner"] == "H1"
-    h2_correct = results["H2_data"]["winner"] == "H2"
-
+    h1_correct = results["H1_data"]["H1_wins"] > results["H1_data"]["H2_wins"]
+    h2_correct = results["H2_data"]["H2_wins"] > results["H2_data"]["H1_wins"]
     if h1_correct and h2_correct:
         print("Diagonal: models are identifiable ✓")
     elif h1_correct or h2_correct:
-        print("Partially diagonal: one model identifiable")
+        print("Partially diagonal")
     else:
         print("Off-diagonal: models are confounded")
 
-    for data_label in ["H1_data", "H2_data"]:
-        r = results[data_label]
-        delta = abs(r["H1_bic"] - r["H2_bic"])
-        print(f"  Δ BIC ({data_label}): {delta:.1f}")
 
+def plot_confusion_matrix(results, filename="confusion_matrix.png"):
+    wins = np.array([
+        [results["H1_data"]["H1_wins"], results["H1_data"]["H2_wins"]],
+        [results["H2_data"]["H1_wins"], results["H2_data"]["H2_wins"]],
+    ])
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(wins, cmap="Greens", aspect="auto")
+    ax.set_xticks([0, 1]); ax.set_xticklabels(["Fit H1 wins", "Fit H2 wins"])
+    ax.set_yticks([0, 1]); ax.set_yticklabels(["H1 data", "H2 data"])
+    ax.set_title("Confusion Matrix (win counts)")
+    for i in range(2):
+        for j in range(2):
+            ax.text(j, i, f"{wins[i, j]}", ha="center", va="center",
+                    fontsize=20, fontweight="bold")
+    fig.colorbar(im, label="Subjects won")
+    fig.tight_layout()
+    fig.savefig(filename, dpi=150)
+    print(f"{filename} saved")
 
-# =============================================================================
-# CLI entry point
-# =============================================================================
 
 if __name__ == "__main__":
-    results = run_confusion_matrix(n_subjects=10, n_restarts=5, seed=42)
+    results = run_confusion_matrix(n_subjects=10, n_restarts=3, seed=42)
     print_confusion_matrix(results)
+    plot_confusion_matrix(results)

@@ -24,6 +24,7 @@ import warnings
 import numpy as np
 import pandas as pd
 from scipy import integrate, stats
+from scipy.optimize import minimize
 import matplotlib.pyplot as plt
 from ssms.basic_simulators.simulator import simulator as ssms_simulator
 
@@ -811,6 +812,91 @@ def rlddm_plot(fit,
 
     return fig1, fig2
 
+
+
+
+# =============================================================================
+# Shared fitting utilities (used by parameter_recovery, confusion_matrix, etc.)
+# =============================================================================
+
+REVERSAL_POINTS = (36, 56, 71, 86, 106)
+
+H1_PARAMS = ["alpha", "v_max", "beta", "a", "w", "t0"]
+H2_PARAMS = ["alpha", "v_max", "beta", "a_base", "kappa", "tau", "w", "t0"]
+
+H1_DEFAULTS = {"alpha": 0.25, "v_max": 2.0, "beta": 1.0,
+               "a": 3.0, "w": 0.5, "t0": 0.25}
+H2_DEFAULTS = {"alpha": 0.25, "v_max": 2.0, "beta": 1.0,
+               "a_base": 3.0, "kappa": 2.0, "tau": 5.0, "w": 0.5, "t0": 0.25}
+
+BOUNDS = {
+    "alpha":   (1e-3, 0.999),
+    "v_max":   (1e-3, 5.0),
+    "beta":    (1e-3, 5.0),
+    "a":       (0.5, 6.0),
+    "a_base":  (0.5, 6.0),
+    "kappa":   (1e-3, 5.0),
+    "tau":     (1e-3, 20.0),
+    "w":       (0.01, 0.99),
+    "t0":      (1e-3, 1.0),
+}
+
+
+def _unpack(theta, param_names):
+    """Transform an unconstrained vector to a constrained parameter dict."""
+    pars = {}
+    for i, name in enumerate(param_names):
+        lo, hi = BOUNDS[name]
+        pars[name] = lo + (hi - lo) / (1.0 + np.exp(-theta[i]))
+    return pars
+
+
+def fit_model(model, data, reversal_points=None, n_restarts=5, rng=None):
+    """Fit H1 or H2 to data via multi-start Nelder-Mead optimisation."""
+    rng = rng or np.random.default_rng()
+    rp = tuple(reversal_points) if reversal_points is not None else REVERSAL_POINTS
+
+    if model == "H1":
+        params = H1_PARAMS
+    elif model == "H2":
+        params = H2_PARAMS
+    else:
+        raise ValueError(f"Unknown model: {model}")
+
+    def neg_ll(theta):
+        pars = _unpack(theta, params)
+        try:
+            ll = rlddm_log_lik(data, pars, reversal_points=rp)
+        except (ValueError, FloatingPointError):
+            return 1e10
+        return -ll if np.isfinite(ll) else 1e10
+
+    informed = {"alpha": 0.0, "v_max": 0.5, "beta": 0.0,
+                "a": 0.5, "a_base": 0.5, "kappa": 0.0,
+                "tau": 0.0, "w": 0.0, "t0": 0.0}
+    start_informed = np.array([informed[p] for p in params])
+
+    best_ll = np.inf
+    best_pars = None
+
+    for i in range(n_restarts):
+        if i == 0:
+            theta0 = start_informed
+        elif i == 1:
+            theta0 = start_informed + rng.normal(0, 0.3, size=len(params))
+        else:
+            theta0 = rng.normal(0.0, 1.0, size=len(params))
+        result = minimize(neg_ll, theta0, method="Nelder-Mead",
+                          options={"maxiter": 8000, "xatol": 1e-6, "fatol": 1e-6})
+        if result.fun < best_ll:
+            best_ll = result.fun
+            best_pars = _unpack(result.x, params)
+
+    n_trials = len(data)
+    bic = 2 * best_ll + len(params) * np.log(n_trials)
+
+    return {"model": model, "pars": best_pars, "log_lik": -best_ll,
+            "n_params": len(params), "bic": float(bic)}
 
 # =============================================================================
 # CLI entry point
