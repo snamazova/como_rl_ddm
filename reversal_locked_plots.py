@@ -109,7 +109,7 @@ def plot_reversal_locked(groups: dict,
         Maps group label -> list of simulation output dicts.
     """
     fig, (ax_acc, ax_rt) = plt.subplots(2, 1, figsize=(10, 8))
-    colors = ["#0072B2", "#D55E00", "#009E73", "#CC79A7"]
+    colors = ["#009E73", "#CC79A7", "#E69F00", "#56B4E9"]
 
     for i, (label, subjects) in enumerate(groups.items()):
         agg = aggregate_reversal_locked(subjects, reversal_points, window)
