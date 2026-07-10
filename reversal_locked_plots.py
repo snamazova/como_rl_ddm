@@ -178,7 +178,7 @@ if __name__ == "__main__":
         h2_subjects.append(sim)
 
     fig = plot_reversal_locked(
-        {"H1 (drift-only)": h1_subjects, "H2 (boundary-only)": h2_subjects},
+        {"H1 (drift-only)": h1_subjects, "H2 (boundary varies)": h2_subjects},
         list(rp), window=20,
     )
 

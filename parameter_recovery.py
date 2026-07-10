@@ -160,4 +160,4 @@ if __name__ == "__main__":
                "kappa": 2.0, "tau": 5.0, "w": 0.5, "t0": 0.25}
     print("\nFitting H2 recovery...")
     r2 = run_recovery("H2", h2_true, n_restarts=5, seed=42)
-    print_results(r2, "H2 (boundary-only)")
+    print_results(r2, "H2 (boundary varies)")

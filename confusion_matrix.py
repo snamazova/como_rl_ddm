@@ -1,4 +1,4 @@
-"""Confusion matrix model comparison: H1 (drift-only) vs H2 (boundary-only).
+"""Confusion matrix model comparison: H1 (drift-only) vs H2 (boundary varies).
 
 Simulates data under each model, fits both models to both datasets, and
 produces a 2×2 confusion matrix showing which model wins (by BIC) in each

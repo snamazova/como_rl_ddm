@@ -58,7 +58,7 @@ h1_subjects = simulate_group(H1_PARS, N_SUBJECTS, seed_offset=42)
 h2_subjects = simulate_group(H2_PARS, N_SUBJECTS, seed_offset=142)
 
 fig1 = plot_reversal_locked(
-    {"H1 (drift-only)": h1_subjects, "H2 (boundary-only)": h2_subjects},
+    {"H1 (drift-only)": h1_subjects, "H2 (boundary varies)": h2_subjects},
     list(RP), window=20,
 )
 fig1.savefig("reversal_locked.png", dpi=150)
