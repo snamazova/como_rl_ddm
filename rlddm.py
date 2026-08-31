@@ -28,6 +28,25 @@ from scipy.optimize import minimize
 import matplotlib.pyplot as plt
 from ssms.basic_simulators.simulator import simulator as ssms_simulator
 
+from plotting_utils import get_dynamic_fontsize, style_ticks
+
+
+def _apply_dynamic_fontsize(fig) -> float:
+    """Compute and apply a figure-width-scaled base fontsize via rcParams.
+
+    Returns the computed fontsize so callers can also pass it to one-off
+    ``fontsize=`` sites (e.g. ``fig.suptitle``) that don't inherit rcParams.
+    """
+    fontsize = get_dynamic_fontsize(fig_width=fig.get_size_inches()[0])
+    plt.rcParams.update({
+        "font.size": fontsize,
+        "axes.labelsize": fontsize,
+        "xtick.labelsize": fontsize,
+        "ytick.labelsize": fontsize,
+        "legend.fontsize": fontsize,
+    })
+    return fontsize
+
 
 # =============================================================================
 # Default parameters
@@ -126,6 +145,7 @@ def simulate_task_environment(n_trials: int,
 # ---- internal Wiener math ---------------------------------------------------
 
 def _validate_ddm_pars(a: float, w: float, t0: float) -> None:
+    """Check that the DDM parameters are in valid ranges."""
     if a <= 0:
         raise ValueError("a must be positive")
     if not 0 < w < 1:
@@ -607,6 +627,7 @@ def _plot_values(ax, fit, show_legend: bool = False,
     ax.set_title("Learned values")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
+    style_ticks(ax)
     if show_legend and option_names:
         ax.legend(frameon=False)
 
@@ -623,6 +644,7 @@ def _plot_drifts(ax, fit, reversal_points: list | None = None):
     ax.set_title("Drift scaled by value")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
+    style_ticks(ax)
 
 
 def _plot_pred_errors(ax, fit, reversal_points: list | None = None):
@@ -641,6 +663,7 @@ def _plot_pred_errors(ax, fit, reversal_points: list | None = None):
     ax.set_title("Prediction errors")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
+    style_ticks(ax)
 
 
 def _plot_outcomes(ax, fit, task_environment=None, show_legend: bool = False,
@@ -665,6 +688,7 @@ def _plot_outcomes(ax, fit, task_environment=None, show_legend: bool = False,
     ax.set_title("Observed outcomes")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
+    style_ticks(ax)
     if reversal_points:
         for rev in reversal_points:
             ax.axvline(rev, color="gray", ls="--", lw=0.8)
@@ -697,6 +721,7 @@ def _plot_ddm_schematic(ax, pars, colours=None, n_traces: int = 10,
     ax.axvline(t0, color="black", ls=":", lw=0.8)
     ax.text(0, a, "Option 2", ha="right", va="center")
     ax.text(0, 0, "Option 1", ha="right", va="center")
+    style_ticks(ax)
 
     n_steps = 500
     dt = t_max / n_steps
@@ -756,6 +781,7 @@ def _plot_rt_hists(ax, data, colours=None):
     ax.set_title("Response time distributions")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
+    style_ticks(ax)
     ax.axhline(0, color="black", lw=0.5)
 
     for i in range(len(hu)):
@@ -778,14 +804,16 @@ def rlddm_plot(fit,
     rev_points = fit.get("reversal_points")
 
     fig1, axes1 = plt.subplots(2, 2, figsize=(10, 8))
+    fontsize1 = _apply_dynamic_fontsize(fig1)
     _plot_values(axes1[0, 0], fit, show_legends, option_names, rev_points)
     _plot_drifts(axes1[0, 1], fit, rev_points)
     _plot_pred_errors(axes1[1, 0], fit, rev_points)
     _plot_outcomes(axes1[1, 1], fit, task_environment, show_legends, option_names, rev_points)
-    fig1.suptitle("RL-DDM\n" + _parameter_label(pars), fontsize=10)
+    fig1.suptitle("RL-DDM\n" + _parameter_label(pars), fontsize=fontsize1)
     fig1.tight_layout(rect=[0, 0, 1, 0.96])
 
     fig2, axes2 = plt.subplots(3, 2, figsize=(10, 12))
+    fontsize2 = _apply_dynamic_fontsize(fig2)
     value_diff = fit["values"][:, 1] - fit["values"][:, 0]
     cuts = np.unique(np.quantile(value_diff, [0.1, 0.4, 0.6, 0.9], method="linear"))
     if len(cuts) < 4:
@@ -807,7 +835,7 @@ def rlddm_plot(fit,
         axes2[row, 0].set_title(title)
         _plot_rt_hists(axes2[row, 1], fit["data"].iloc[idx])
 
-    fig2.suptitle("RL-DDM\n" + _parameter_label(pars), fontsize=10)
+    fig2.suptitle("RL-DDM\n" + _parameter_label(pars), fontsize=fontsize2)
     fig2.tight_layout(rect=[0, 0, 1, 0.96])
 
     return fig1, fig2
@@ -874,6 +902,23 @@ def fit_model(model, data, reversal_points=None, n_restarts=5, rng=None):
     informed = {"alpha": 0.0, "v_max": 0.5, "beta": 0.0,
                 "a": 0.5, "a_base": 0.5, "kappa": 0.0,
                 "tau": 0.0, "w": 0.0, "t0": 0.0}
+
+    # The generic informed value for t0 (theta=0 -> the bounds midpoint,
+    # ~0.5) is frequently *above* the fastest observed RT once data is
+    # bound in, since real t0 is usually small. ddm_logpdf_trial returns
+    # -inf whenever rt <= t0, so a t0 start above the minimum RT makes the
+    # log-lik -inf at every trial that fast, and Nelder-Mead has no
+    # gradient out of that flat 1e10-penalty plateau. Anchor the t0 start
+    # comfortably below the fastest observed RT instead.
+    if "t0" in params:
+        lo, hi = BOUNDS["t0"]
+        min_rt = float(np.asarray(data["RTs"]).min())
+        t0_target = min(0.5 * min_rt, hi - 1e-3)
+        t0_target = max(t0_target, lo + 1e-3)
+        frac = (t0_target - lo) / (hi - lo)
+        informed = dict(informed)
+        informed["t0"] = float(np.log(frac / (1.0 - frac)))
+
     start_informed = np.array([informed[p] for p in params])
 
     best_ll = np.inf

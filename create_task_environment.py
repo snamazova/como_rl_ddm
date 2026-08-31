@@ -3,7 +3,7 @@ import random
 
 import numpy as np
 import matplotlib.pyplot as plt
-
+from plotting_utils import get_dynamic_fontsize, save_panel, style_ticks
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -113,56 +113,100 @@ def generate_timeline(num_trials=140, seed=None, reversed_state=None,
     return timeline
 
 
-def plot_reward_distribution(timeline, reversal_points, num_trials, p_correct,
-                              reversed_state, save_path=None, show=True):
-    bandit_1_rewards = [trial["bandit_1"]["value"] for trial in timeline]
-    bandit_2_rewards = [trial["bandit_2"]["value"] for trial in timeline]
-
-    fig, (ax_trials, ax_hist) = plt.subplots(
-        2, 1, figsize=(10, 8), gridspec_kw={"height_ratios": [2, 1]}
-    )
-
-    trials = range(1, num_trials + 1)
-    ax_trials.plot(trials, bandit_1_rewards, label="Bandit 1 (Orange)", color="orange",
-                    marker="o", linestyle="None", alpha=0.7)
-    ax_trials.plot(trials, bandit_2_rewards, label="Bandit 2 (Blue)", color="blue",
-                    marker="o", linestyle="None", alpha=0.7)
-    for rev in reversal_points:
-        ax_trials.axvline(rev, color="gray", linestyle="--", linewidth=0.8)
-    ax_trials.set_title("Reward Outcomes Over Trials")
-    ax_trials.set_xlabel("Trial Number")
-    ax_trials.set_ylabel("Reward Outcome (0 or 1)")
-    ax_trials.set_xticks(range(0, num_trials + 1, max(num_trials // 14, 1)))
-    ax_trials.set_yticks([0, 1])
-    ax_trials.legend()
-
-    # Sanity-check histogram: realized reward probability for the
-    # currently-correct bandit within each between-reversal block, compared
-    # against the requested p_correct.
+def _bandit_1_prob_curve(num_trials, reversal_points, reversed_state, p_correct,
+                          ramp_width=2):
+    """(x, y) control points tracing bandit_1's reward probability: flat at
+    p_correct/1-p_correct within each block, with a `ramp_width`-trial linear
+    ramp centered on each reversal point (rather than an instantaneous jump)
+    so the transition reads as a visible diagonal instead of a near-vertical
+    step. Mirrors the block structure generate_timeline() uses to actually
+    sample rewards, so the schedule shown here always matches the
+    trial-level correct/incorrect labels."""
     boundaries = [0] + list(reversal_points) + [num_trials]
-    block_labels, realized_probs = [], []
     bandit_1_correct = reversed_state
+    levels = []
     for start, end in zip(boundaries[:-1], boundaries[1:]):
-        block = timeline[start:end]
-        correct_key = "bandit_1" if bandit_1_correct else "bandit_2"
-        wins = sum(t[correct_key]["value"] for t in block)
-        realized_probs.append(wins / len(block))
-        block_labels.append(f"{start}-{end}")
+        levels.append(p_correct if bandit_1_correct else 1 - p_correct)
         bandit_1_correct = not bandit_1_correct
 
-    ax_hist.bar(block_labels, realized_probs, color="seagreen", alpha=0.8)
-    ax_hist.axhline(p_correct, color="black", linestyle="--", linewidth=1,
-                     label=f"target p_correct = {p_correct}")
-    ax_hist.set_title("Realized Reward Probability per Block")
-    ax_hist.set_xlabel("Block (trial range)")
-    ax_hist.set_ylabel("P(correct bandit rewarded)")
-    ax_hist.set_ylim(0, 1)
-    ax_hist.legend()
+    half = ramp_width / 2
+    xs, ys = [1], [levels[0]]
+    for i, rev in enumerate(reversal_points):
+        xs += [rev - half, rev + half]
+        ys += [levels[i], levels[i + 1]]
+    xs.append(num_trials)
+    ys.append(levels[-1])
+    return np.array(xs), np.array(ys)
+
+
+def plot_reward_distribution(timeline, reversal_points, num_trials, p_correct,
+                              reversed_state, save_path=None, show=True):
+    """Plot the sampled reward outcomes (top) and the reward probability
+    schedule (bottom) over trials, with reversal points marked.
+    """
+    bandit_1_rewards = [trial["bandit_1"]["value"] for trial in timeline]
+    bandit_2_rewards = [trial["bandit_2"]["value"] for trial in timeline]
+    figsize = (6, 3)  # inches
+    fig, (ax_top, ax) = plt.subplots(
+        2, 1, figsize=figsize, sharex=True,
+        gridspec_kw={"height_ratios": [0.3, 1]},
+    )
+    fontsize = get_dynamic_fontsize(fig_width=fig.get_size_inches()[0])
+    plt.rcParams.update({
+        "font.size": fontsize,
+        "axes.labelsize": fontsize,
+        "xtick.labelsize": fontsize,
+        "ytick.labelsize": fontsize,
+        "legend.fontsize": fontsize,
+    })
+    trials = range(1, num_trials + 1)
+
+    bandit_1_reward_trials = [t for t, r in zip(trials, bandit_1_rewards) if r == 1]
+    bandit_2_reward_trials = [t for t, r in zip(trials, bandit_2_rewards) if r == 1]
+    ax_top.eventplot([bandit_1_reward_trials], lineoffsets=[1], linelengths=0.8,
+                      colors="orange", label="Bandit 1")
+    ax_top.eventplot([bandit_2_reward_trials], lineoffsets=[0], linelengths=0.8,
+                      colors="blue", label="Bandit 2")
+    for spine in ["top", "right","bottom"]:
+            ax_top.spines[spine].set_visible(False)
+    for rev in reversal_points:
+        ax_top.axvline(rev, color="gray", linestyle="--", linewidth=0.8)
+
+    #ax_top.set_title("Ground Truth Reward Outcomes")
+    ax_top.set_ylim(-0.5, 1.5)
+    ax_top.set_yticks([0, 1])
+    ax_top.set_yticklabels(["Bandit 2", "Bandit 1"])
+    style_ticks(ax_top)
+
+    prob_x, p_bandit_1 = _bandit_1_prob_curve(num_trials, reversal_points, reversed_state, p_correct)
+    p_bandit_2 = 1 - p_bandit_1
+    ax.plot(prob_x, p_bandit_1, color="orange", lw=2.5, solid_capstyle="butt",
+            label="Bandit 1")
+    ax.plot(prob_x, p_bandit_2, color="blue", lw=2.5, solid_capstyle="butt",
+            label="Bandit 2")
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
+    for rev in reversal_points:
+        ax.axvline(rev, color="gray", linestyle="--", linewidth=0.8)
+        #ax.text(rev - figsize[0] * 0.1, figsize[1] * 0.01, 'reversal', rotation=90, va='bottom', ha='center', alpha=0.45)
+    ax.set_ylim(0, 1)
+    ax.set_yticks([p_correct, 1 - p_correct])
+    ax.set_ylabel("Reward Probability")
+    
+    #place title in the bottom of the plot
+    #ax.set_title("Reward Probability Schedule", y=-0.5)
+    ax.set_xlabel("Trial")
+    ax.set_xticks(range(0, num_trials + 1, 20))
+    style_ticks(ax)
+
+    handles, labels = ax.get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=len(labels),
+               bbox_to_anchor=(0.5, 1.05), frameon=False)
 
     fig.tight_layout()
 
     if save_path:
-        fig.savefig(save_path, dpi=150)
+        save_panel(fig, save_path, figsize=fig.get_size_inches())
         print(f"Saved plot to {save_path}")
     if show:
         plt.show()

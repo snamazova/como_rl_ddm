@@ -22,6 +22,24 @@ from rlddm import (
     rlddm_simulate, fit_model,
     H1_DEFAULTS, H2_DEFAULTS, REVERSAL_POINTS,
 )
+from plotting_utils import get_dynamic_fontsize, save_panel, style_ticks
+
+
+def _apply_dynamic_fontsize(fig) -> float:
+    """Compute and apply a figure-width-scaled base fontsize via rcParams.
+
+    Returns the computed fontsize so callers can also pass it to one-off
+    ``fontsize=`` sites (e.g. ``fig.suptitle``) that don't inherit rcParams.
+    """
+    fontsize = get_dynamic_fontsize(fig_width=fig.get_size_inches()[0])
+    plt.rcParams.update({
+        "font.size": fontsize,
+        "axes.labelsize": fontsize,
+        "xtick.labelsize": fontsize,
+        "ytick.labelsize": fontsize,
+        "legend.fontsize": fontsize,
+    })
+    return fontsize
 
 
 RP = REVERSAL_POINTS
@@ -103,17 +121,20 @@ def plot_confusion_matrix(results, filename="confusion_matrix.png"):
         [results["H2_data"]["H1_wins"], results["H2_data"]["H2_wins"]],
     ])
     fig, ax = plt.subplots(figsize=(6, 5))
+    fontsize = _apply_dynamic_fontsize(fig)
     im = ax.imshow(wins, cmap="Greens", aspect="auto")
     ax.set_xticks([0, 1]); ax.set_xticklabels(["Fit H1 wins", "Fit H2 wins"])
     ax.set_yticks([0, 1]); ax.set_yticklabels(["H1 data", "H2 data"])
     ax.set_title("Confusion Matrix (win counts)")
+    style_ticks(ax)
     for i in range(2):
         for j in range(2):
             ax.text(j, i, f"{wins[i, j]}", ha="center", va="center",
-                    fontsize=20, fontweight="bold")
+                    fontsize=get_dynamic_fontsize(fig_width=fig.get_size_inches()[0], base_font=20),
+                    fontweight="bold")
     fig.colorbar(im, label="Subjects won")
     fig.tight_layout()
-    fig.savefig(filename, dpi=150)
+    save_panel(fig, filename, figsize=fig.get_size_inches(), dpi=150)
     print(f"{filename} saved")
 
 

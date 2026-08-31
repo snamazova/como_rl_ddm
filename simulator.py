@@ -21,6 +21,24 @@ from create_task_environment import (
     timeline_to_correct,
 )
 from rlddm import rlddm_simulate
+from plotting_utils import get_dynamic_fontsize, style_ticks
+
+
+def _apply_dynamic_fontsize(fig) -> float:
+    """Compute and apply a figure-width-scaled base fontsize via rcParams.
+
+    Returns the computed fontsize so callers can also pass it to one-off
+    ``fontsize=`` sites (e.g. ``fig.suptitle``) that don't inherit rcParams.
+    """
+    fontsize = get_dynamic_fontsize(fig_width=fig.get_size_inches()[0])
+    plt.rcParams.update({
+        "font.size": fontsize,
+        "axes.labelsize": fontsize,
+        "xtick.labelsize": fontsize,
+        "ytick.labelsize": fontsize,
+        "legend.fontsize": fontsize,
+    })
+    return fontsize
 
 
 # =============================================================================
@@ -221,6 +239,7 @@ def plot_group_comparison(group_results: dict,
         Group labels in the same order as group_results keys.
     """
     fig, (ax_acc, ax_rt) = plt.subplots(2, 1, figsize=(10, 8))
+    _apply_dynamic_fontsize(fig)
 
     colors = ["#0072B2", "#D55E00", "#009E73", "#CC79A7"]
 
@@ -260,6 +279,7 @@ def plot_group_comparison(group_results: dict,
     ax_acc.legend(frameon=False)
     ax_acc.spines["top"].set_visible(False)
     ax_acc.spines["right"].set_visible(False)
+    style_ticks(ax_acc)
 
     ax_rt.set_xlabel("Trial")
     ax_rt.set_ylabel("Response time (s)")
@@ -267,8 +287,11 @@ def plot_group_comparison(group_results: dict,
     ax_rt.legend(frameon=False)
     ax_rt.spines["top"].set_visible(False)
     ax_rt.spines["right"].set_visible(False)
+    style_ticks(ax_rt)
 
-    fig.suptitle(title, fontweight="bold")
+    fig.suptitle(title, fontweight="bold",
+                fontsize=get_dynamic_fontsize(fig_width=fig.get_size_inches()[0],
+                                              base_font=14))
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     return fig
 
@@ -283,6 +306,7 @@ def plot_post_reversal(group_results: list,
     averaged across subjects and across reversal points.
     """
     fig, ax = plt.subplots(figsize=(8, 5))
+    _apply_dynamic_fontsize(fig)
     colors = ["#0072B2", "#D55E00", "#009E73", "#CC79A7"]
 
     for i, (label, subjects) in enumerate(zip(labels, group_results)):
@@ -314,6 +338,7 @@ def plot_post_reversal(group_results: list,
     ax.legend(frameon=False)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
+    style_ticks(ax)
     fig.tight_layout()
     return fig
 
@@ -326,9 +351,9 @@ if __name__ == "__main__":
     reversal_points = (36, 56, 71, 86, 106)
 
     # Define two groups differing in learning rate
-    group_a_pars = {"alpha": 0.30, "v_intercept": 0.0, "v_scale": 1.0,
+    group_a_pars = {"alpha": 0.30, "v_max": 2.0, "beta": 1.0,
                     "a": 3.0, "w": 0.5, "t0": 0.25}
-    group_b_pars = {"alpha": 0.10, "v_intercept": 0.0, "v_scale": 1.0,
+    group_b_pars = {"alpha": 0.10, "v_max": 2.0, "beta": 1.0,
                     "a": 3.0, "w": 0.5, "t0": 0.25}
 
     print("Simulating Group A (alpha=0.30)...")

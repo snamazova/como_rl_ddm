@@ -20,6 +20,24 @@ from create_task_environment import (
     timeline_to_correct,
 )
 from rlddm import rlddm_simulate
+from plotting_utils import get_dynamic_fontsize, style_ticks
+
+
+def _apply_dynamic_fontsize(fig) -> float:
+    """Compute and apply a figure-width-scaled base fontsize via rcParams.
+
+    Returns the computed fontsize so callers can also pass it to one-off
+    ``fontsize=`` sites (e.g. ``fig.suptitle``) that don't inherit rcParams.
+    """
+    fontsize = get_dynamic_fontsize(fig_width=fig.get_size_inches()[0])
+    plt.rcParams.update({
+        "font.size": fontsize,
+        "axes.labelsize": fontsize,
+        "xtick.labelsize": fontsize,
+        "ytick.labelsize": fontsize,
+        "legend.fontsize": fontsize,
+    })
+    return fontsize
 
 
 # =============================================================================
@@ -109,6 +127,7 @@ def plot_reversal_locked(groups: dict,
         Maps group label -> list of simulation output dicts.
     """
     fig, (ax_acc, ax_rt) = plt.subplots(2, 1, figsize=(10, 8))
+    fontsize = _apply_dynamic_fontsize(fig)
     colors = ["#009E73", "#CC79A7", "#E69F00", "#56B4E9"]
 
     for i, (label, subjects) in enumerate(groups.items()):
@@ -133,6 +152,7 @@ def plot_reversal_locked(groups: dict,
     ax_acc.legend(frameon=False)
     ax_acc.spines["top"].set_visible(False)
     ax_acc.spines["right"].set_visible(False)
+    style_ticks(ax_acc)
 
     ax_rt.axvline(0, color="gray", ls="--", lw=1, label="reversal")
     ax_rt.set_xlabel("Trial relative to reversal")
@@ -141,8 +161,10 @@ def plot_reversal_locked(groups: dict,
     ax_rt.legend(frameon=False)
     ax_rt.spines["top"].set_visible(False)
     ax_rt.spines["right"].set_visible(False)
+    style_ticks(ax_rt)
 
-    fig.suptitle("Post-reversal behaviour (trial −20 to +20)", fontweight="bold")
+    fig.suptitle("Post-reversal behaviour (trial −20 to +20)", fontweight="bold",
+                fontsize=fontsize)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     return fig
 

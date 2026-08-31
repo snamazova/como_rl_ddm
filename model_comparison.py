@@ -7,7 +7,7 @@ explanatory power.
 
 The three models are:
     1. Full RLDDM  — all parameters free (learning + DDM)
-    2. DDM-only    — v_scale = 0 (no value-based drift, just a constant bias)
+    2. DDM-only    — beta = 0 (no value-based drift; w still gives a constant bias)
     3. RL-only     — softmax choice probabilities, no DDM / no RTs
 
 Models 2 and 3 are nested within model 1, so the comparison is valid.
@@ -117,19 +117,22 @@ def rlddm_choice_log_lik(data: pd.DataFrame,
 
 
 # =============================================================================
-# DDM-only model: constant drift (v_scale = 0), no learning
+# DDM-only model: constant drift (beta = 0), no learning
 # =============================================================================
 
 def ddm_only_log_lik(data: pd.DataFrame, pars: dict) -> float:
     """Log-likelihood of a DDM-only model (no value-based learning).
 
-    Uses the full RLDDM likelihood machinery but with ``v_scale = 0``,
-    so the drift rate is just ``v_intercept`` (a constant).  Values are
-    still reconstructed from the observed choices/outcomes for consistency,
-    but they have no effect on the drift.
+    Uses the full RLDDM likelihood machinery but with ``beta = 0``, so
+    ``v = v_max * tanh(beta * delta_Q)`` is exactly 0 on every trial
+    regardless of the learned values (``v_max`` becomes irrelevant too,
+    since it multiplies a constant 0). Values are still reconstructed from
+    the observed choices/outcomes for consistency, but they have no effect
+    on the drift. Any static choice bias is captured by the starting point
+    ``w``, not by a separate intercept term.
     """
     pars_fixed = dict(pars)
-    pars_fixed["v_scale"] = 0.0
+    pars_fixed["beta"] = 0.0
     return rlddm_log_lik(data, pars_fixed)
 
 
@@ -138,22 +141,26 @@ def ddm_only_log_lik(data: pd.DataFrame, pars: dict) -> float:
 # =============================================================================
 
 # Parameter sets and bounds for each model
-# Full RLDDM: alpha, v_intercept, v_scale, a, w, t0
-# DDM-only:  v_intercept, a, w, t0 (alpha irrelevant for drift, but still learned for values)
-# RL-only:   alpha, beta
+# Full RLDDM: alpha, v_max, beta, a, w, t0
+# DDM-only:  a, w, t0 (alpha and beta are fixed — see ddm_only_log_lik — so
+#            neither learning nor value-based drift is fit; w still gives a
+#            constant starting-point bias)
+# RL-only:   alpha, beta (beta here is the softmax inverse temperature, a
+#            different quantity from the DDM's tanh sensitivity above, but
+#            reusing the shared "beta" bounds below is fine since each model
+#            is fit independently)
 
-FULL_PARAMS = ["alpha", "v_intercept", "v_scale", "a", "w", "t0"]
-DDM_ONLY_PARAMS = ["v_intercept", "a", "w", "t0"]
+FULL_PARAMS = ["alpha", "v_max", "beta", "a", "w", "t0"]
+DDM_ONLY_PARAMS = ["a", "w", "t0"]
 RL_ONLY_PARAMS = ["alpha", "beta"]
 
 BOUNDS = {
-    "alpha":       (1e-3, 0.999),
-    "v_intercept": (-3.0, 3.0),
-    "v_scale":     (1e-3, 5.0),
-    "a":           (0.5, 6.0),
-    "w":           (0.01, 0.99),
-    "t0":          (1e-3, 1.0),
-    "beta":        (1e-3, 10.0),
+    "alpha": (1e-3, 0.999),
+    "v_max": (1e-3, 5.0),
+    "beta":  (1e-3, 10.0),
+    "a":     (0.5, 6.0),
+    "w":     (0.01, 0.99),
+    "t0":    (1e-3, 1.0),
 }
 
 
@@ -265,7 +272,7 @@ def run_comparison(true_pars: dict,
     # 2. Fit all models
     print("Fitting full RLDDM (choice + RT)...")
     fit_full = fit_model("full", data, n_restarts=n_restarts, rng=rng)
-    print("Fitting DDM-only (v_scale=0, choice + RT)...")
+    print("Fitting DDM-only (beta=0, choice + RT)...")
     fit_ddm = fit_model("ddm_only", data, n_restarts=n_restarts, rng=rng)
     print("Fitting full RLDDM (choice only, RTs integrated out)...")
     fit_full_choice = fit_model("full_choice", data, n_restarts=n_restarts, rng=rng)
@@ -345,8 +352,8 @@ def print_comparison(results: dict):
 if __name__ == "__main__":
     true_pars = {
         "alpha": 0.25,
-        "v_intercept": 0.0,
-        "v_scale": 1.0,
+        "v_max": 2.0,
+        "beta": 1.0,
         "a": 3.0,
         "w": 0.5,
         "t0": 0.25,
